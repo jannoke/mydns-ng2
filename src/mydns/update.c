@@ -318,10 +318,21 @@ update_gobble_rr(TASK *t, uchar *query, size_t querylen, uchar *current, UQRR *r
   DebugX("update", 1, _("%s: update_gobble_rr unencoded name src=%s"), desctask(t), UQRR_NAME(rr));
 #endif
 
+  /* The fixed part of the RR (TYPE, CLASS, TTL, RDLENGTH) must be inside the packet */
+  if (src + SIZE16 + SIZE16 + SIZE32 + SIZE16 > query + querylen) {
+    formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
+    return NULL;
+  }
   DNS_GET16(rr->type, src);
   DNS_GET16(rr->class, src);
   DNS_GET32(rr->ttl, src);
   DNS_GET16(UQRR_DATA_LENGTH(rr), src);
+
+  /* RDLENGTH is attacker-supplied: it must not claim more data than the packet holds */
+  if (UQRR_DATA_LENGTH(rr) > (size_t)(query + querylen - src)) {
+    formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
+    return NULL;
+  }
   UQRR_DATA_VALUE(rr) = ALLOCATE(UQRR_DATA_LENGTH(rr)+1, char[]);
 
   memcpy(UQRR_DATA_VALUE(rr), src, UQRR_DATA_LENGTH(rr));
@@ -354,6 +365,8 @@ parse_update_query(TASK *t, UQ *q) {
   */
   if (!(UQ_NAME(q) = name_unencode2(query, querylen, &src, &errcode)))
     return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
+  if (src + SIZE16 + SIZE16 > query + querylen)
+    return formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
   DNS_GET16(q->type, src);
   DNS_GET16(q->class, src);
 #if DEBUG_ENABLED && DEBUG_UPDATE
