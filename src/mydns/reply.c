@@ -1115,7 +1115,8 @@ build_reply(TASK *t, int want_additional) {
   DNS_PUT16(dest, arcount);					/* ADDITIONAL count */
   if (t->qdlen && t->qd)
     DNS_PUT(dest, t->qd, t->qdlen);				/* Data for QUESTION section */
-  DNS_PUT(dest, t->rdata, t->rdlen);				/* Resource record data */
+  if (t->rdlen && t->rdata)
+    DNS_PUT(dest, t->rdata, t->rdlen);				/* Resource record data */
 
 #if DEBUG_ENABLED && DEBUG_REPLY
   DebugX("reply", 1, _("%s: reply:     id = %u"), desctask(t),
