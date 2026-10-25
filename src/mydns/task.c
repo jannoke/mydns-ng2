@@ -470,7 +470,7 @@ _task_init(
       wrap_round = 1;
     }
     taskvec_index = id >> 5;
-    taskvec_mask = taskvec_masks[id & 0x1ff];
+    taskvec_mask = taskvec_masks[id & 0x1f];
     if (!taskvec[taskvec_index]
 	|| (taskvec[taskvec_index] & taskvec_mask) == 0) break;
   }
@@ -563,7 +563,7 @@ _task_free(TASK *t, const char *file, int line) {
   RELEASE(t->rdata);
   RELEASE(t->reply);
 
-  taskvec[t->internal_id >> 5] &= ~taskvec_masks[t->internal_id & 0x1ff];
+  taskvec[t->internal_id >> 5] &= ~taskvec_masks[t->internal_id & 0x1f];
 
   RELEASE(t);
 
