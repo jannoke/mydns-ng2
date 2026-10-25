@@ -254,8 +254,9 @@ task_new(TASK *t, unsigned char *data, size_t len) {
   memcpy(t->qd, src, t->qdlen);
   qdtop = src;
 
-  /* Get query name */
-  if (!(qname = name_unencode2((uchar*)t->qd, t->qdlen, (uchar**)&src, &errcode))) {
+  /* Get query name - src points into `data', and compression offsets are relative to the
+     start of the whole message, so decode against `data', not the t->qd copy */
+  if (!(qname = name_unencode2((uchar*)data, len, (uchar**)&src, &errcode))) {
     Warnx(_("%s: FORMERR in query decoding name"), desctask(t));
     return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
   }

@@ -411,7 +411,7 @@ notify_read(TASK *t) {
 				uchar *msg2 = NULL;
 				task_error_t errcode = TASK_FAILED;
 				DebugX("notify", 1, _("%s: DNS NOTIFY notify_read response is a query"), desctask(t));
-				msg2 = name_unencode2(src, rv - DNS_HEADERSIZE, &current, &errcode);
+				msg2 = name_unencode2(in, rv, &current, &errcode);
 				if (msg2) {
 					dns_qtype_t qtype = 0;
 					dns_class_t qclass = 0;
