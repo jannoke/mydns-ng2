@@ -136,6 +136,7 @@ extern void		*array_remove(ARRAY *);
 /* axfr.c */
 extern void		axfr(TASK *);
 extern void		axfr_fork(TASK *);
+extern int		xfer_allowed(TASK *, MYDNS_SOA *);
 
 /* data.c */
 extern MYDNS_SOA	*find_soa(TASK *, char *, char *);

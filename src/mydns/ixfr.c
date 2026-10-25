@@ -89,6 +89,11 @@ ixfr_gobble_authority_rr(TASK *t, uchar *query, size_t querylen, uchar *current,
     formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
     return NULL;
   }
+  /* TYPE, CLASS, TTL and RDLENGTH must be inside the packet */
+  if (src + SIZE16 + SIZE16 + SIZE32 + SIZE16 > query + querylen) {
+    formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
+    return NULL;
+  }
   DNS_GET16(rr->type, src);
   DNS_GET16(rr->class, src);
   DNS_GET32(rr->ttl, src);
@@ -104,6 +109,11 @@ ixfr_gobble_authority_rr(TASK *t, uchar *query, size_t querylen, uchar *current,
     return NULL;
   }
 
+  /* The five SOA counters must be inside the packet */
+  if (src + SIZE32 * 5 > query + querylen) {
+    formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
+    return NULL;
+  }
   DNS_GET32(rr->serial, src);
   DNS_GET32(rr->refresh, src);
   DNS_GET32(rr->retry, src);
@@ -147,6 +157,20 @@ ixfr(TASK * t, datasection_t section, dns_qtype_t qtype, char *fqdn, int truncat
     return (TASK_FAILED);
   }
 
+  /* IXFR can hand out the whole zone, so it is subject to the same "xfer" ACL as AXFR */
+  switch (xfer_allowed(t, soa)) {
+  case 1:
+    break;
+  case 0:
+    mydns_soa_free(soa);
+    dnserror(t, DNS_RCODE_REFUSED, ERR_NO_AXFR);
+    return (TASK_FAILED);
+  default:
+    mydns_soa_free(soa);
+    dnserror(t, DNS_RCODE_SERVFAIL, ERR_DB_ERROR);
+    return (TASK_FAILED);
+  }
+
 #if DEBUG_ENABLED && DEBUG_IXFR
   DebugX("ixfr", 1, _("%s: DNS IXFR: SOA id %u"), desctask(t), soa->id);
   DebugX("ixfr", 1, _("%s: DNS IXFR: QDCOUNT=%d (Query)"), desctask(t), t->qdcount);
@@ -181,6 +205,10 @@ ixfr(TASK * t, datasection_t section, dns_qtype_t qtype, char *fqdn, int truncat
     return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
   }
 
+  if (src + SIZE16 + SIZE16 > query + querylen) {
+    free_iq(q);
+    return formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
+  }
   DNS_GET16(q->type, src);
   DNS_GET16(q->class, src);
 
