@@ -211,7 +211,8 @@ AC_DEFUN([AC_CHECK_IPV6],
 	[
 		AC_MSG_CHECKING([whether IPv6 is supported])
 		AC_TRY_COMPILE(
-			[#include <netinet/in.h>],
+			[#include <string.h>
+#include <netinet/in.h>],
 			[struct in6_addr addr; memset(&addr,0,sizeof(struct in6_addr));],
 				[ AC_DEFINE([HAVE_IPV6], 1, [Is IPv6 supported?])
 				  AC_MSG_RESULT([yes]) ],
