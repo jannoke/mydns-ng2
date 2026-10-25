@@ -2275,7 +2275,11 @@ are_we_master(TASK *t, MYDNS_SOA *soa) {
   int i = 0, j = 0, res = 1;
 
   int ipcount = 0;
-  ARRAY *nss = array_init(1);
+  ARRAY *nss = NULL;
+
+  if (!allLocalAddresses)		/* Interface list unavailable: we cannot claim to be master */
+    return (0);
+  nss = array_init(1);
 
   array_append(nss, STRDUP(soa->ns));
 
@@ -2321,7 +2325,7 @@ are_we_master(TASK *t, MYDNS_SOA *soa) {
  FINISHEDSEARCH:
 
   array_free(ips4, 1);
-#if HAVE_IPV4
+#if HAVE_IPV6
   array_free(ips6, 1);
 #endif
 
