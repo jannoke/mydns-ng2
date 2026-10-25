@@ -1444,7 +1444,7 @@ update_add_rr(TASK *t, MYDNS_SOA *soa, UQRR *rr, uint32_t next_serial) {
       {
 	char *serialstr = NULL;
 	if (mydns_rr_use_serial)
-	  ASPRINTF(&serialstr, "%u", next_serial);
+	  ASPRINTF(&serialstr, ",%u", next_serial);
 	querylen = sql_build_query(&query,
 #if USE_PGSQL
 				   "INSERT INTO %s"
