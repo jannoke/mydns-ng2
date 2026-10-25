@@ -384,9 +384,6 @@ _mydns_rr_free(MYDNS_RR *first) {
 
   for (p = first; p; p = tmp) {
     tmp = p->next;
-#if !USE_PGSQL
-    RELEASE(p->stamp);
-#endif
     RELEASE(__MYDNS_RR_NAME(p));
     RELEASE(__MYDNS_RR_DATA_VALUE(p));
     switch (p->type) {
@@ -414,11 +411,6 @@ mydns_rr_build(uint32_t id,
 	       uint32_t aux,
 	       uint32_t ttl,
 	       char *active,
-#if USE_PGSQL
-	       timestamp stamp,
-#else
-	       MYSQL_TIME *stamp,
-#endif
 	       uint32_t serial,
 	       char *name,
 	       char *data,
@@ -430,13 +422,8 @@ mydns_rr_build(uint32_t id,
 #if DEBUG_ENABLED && DEBUG_LIB_RR
   DebugX("lib-rr", 1, _("mydns_rr_build(): called for id=%d, zone=%d, type=%d, class=%d, aux=%d, "
 			"ttl=%d, active='%s', "
-#if USE_PGSQL
-			"stamp=%ld, "
-#else
-			"stamp=%p, "
-#endif
 			"serial=%d, name='%s', data=%p, datalen=%d, origin='%s'"),
-	 id, zone, type, class, aux, ttl, active, stamp, serial,
+	 id, zone, type, class, aux, ttl, active, serial,
 	 (name)?name:_("<NULL>"), data, datalen, origin);
 #endif
 
@@ -481,7 +468,6 @@ mydns_rr_build(uint32_t id,
     }
   }
   rr->active = active;
-  rr->stamp = stamp;
   rr->serial = serial;
 
   switch (rr->type) {
@@ -558,11 +544,6 @@ inline MYDNS_RR *
 mydns_rr_parse(SQL_ROW row, unsigned long *lengths, const char *origin) {
   dns_qtype_t	type;
   char		*active = NULL;
-#if USE_PGSQL
-  timestamp	stamp = 0;
-#else
-  MYSQL_TIME	*stamp = NULL;
-#endif
   uint32_t	serial = 0;
   int		ridx = MYDNS_RR_NUMFIELDS;
   char		*data;
@@ -595,14 +576,10 @@ mydns_rr_parse(SQL_ROW row, unsigned long *lengths, const char *origin) {
 
   /* Copy storage? */
   if (mydns_rr_use_active) active = row[ridx++];
-  if (mydns_rr_use_stamp) {
-#if USE_PGSQL
-    stamp = (timestamp)row[ridx++];
-#else
-    stamp = (MYSQL_TIME*)ALLOCATE(sizeof(MYSQL_TIME), MYSQL_TIME);
-    memcpy(stamp, row[ridx++], sizeof(MYSQL_TIME));
-#endif
-  }
+  /* The "stamp" column is only used in SQL (IXFR garbage collection); nothing in the
+     server reads its value, so just step over it. */
+  if (mydns_rr_use_stamp)
+    ridx++;
   if (mydns_rr_use_serial && row[ridx]) {
     serial = atou(row[ridx++]);
   }
@@ -614,7 +591,6 @@ mydns_rr_parse(SQL_ROW row, unsigned long *lengths, const char *origin) {
 		      atou(row[4]),
 		      atou(row[5]),
 		      active,
-		      stamp,
 		      serial,
 		      row[2],
 		      data,
@@ -659,15 +635,6 @@ mydns_rr_dup(MYDNS_RR *start, int recurse) {
 #endif
 
     rr->active = s->active;
-#if USE_PGSQL
-    rr->stamp = s->stamp;
-#else
-    if (s->stamp) {
-      rr->stamp = (MYSQL_TIME*)ALLOCATE(sizeof(MYSQL_TIME), MYSQL_TIME);
-      memcpy(rr->stamp, s->stamp, sizeof(MYSQL_TIME));
-    } else
-      rr->stamp = NULL;
-#endif
     rr->serial = s->serial;
 
     switch (rr->type) {
@@ -720,10 +687,6 @@ mydns_rr_size(MYDNS_RR *first) {
     size += sizeof(MYDNS_RR)
       + (strlen(__MYDNS_RR_NAME(p)) + 1)
       + (__MYDNS_RR_DATA_LENGTH(p) + 1);
-#if USE_PGSQL
-#else
-    size += sizeof(MYSQL_TIME);
-#endif
     switch (p->type) {
     case DNS_QTYPE_NAPTR:
       size += strlen(__MYDNS_RR_NAPTR_SERVICE(p)) + 1;
