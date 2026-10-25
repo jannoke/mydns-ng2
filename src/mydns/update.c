@@ -35,6 +35,7 @@ typedef struct _update_query_rr {
   struct {
     uint16_t		len;
     uchar		*value;
+    size_t		offset;		/* Where the RDATA starts in t->query */
   } rdata;
 } UQRR;
 
@@ -333,6 +334,7 @@ update_gobble_rr(TASK *t, uchar *query, size_t querylen, uchar *current, UQRR *r
     formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
     return NULL;
   }
+  rr->rdata.offset = src - query;
   UQRR_DATA_VALUE(rr) = ALLOCATE(UQRR_DATA_LENGTH(rr)+1, char[]);
 
   memcpy(UQRR_DATA_VALUE(rr), src, UQRR_DATA_LENGTH(rr));
@@ -481,6 +483,36 @@ text_retrieve(unsigned char **srcp, unsigned char *end, size_t *datalen, int one
 
 
 /**************************************************************************************************
+	UPDATE_RDATA_NAME
+	Decode the domain name at offset *pos within rr's RDATA and advance *pos past it.
+	Names in RDATA may use compression pointers into the rest of the message, so they are
+	decoded against the original query (t->query), not the RDATA copy; the name must still
+	end inside the RDATA. Returns the name, or NULL with *errcode set.
+**************************************************************************************************/
+static char *
+update_rdata_name(TASK *t, UQRR *rr, size_t *pos, task_error_t *errcode) {
+  uchar		*rdstart = (uchar*)t->query + rr->rdata.offset;
+  uchar		*cur = rdstart + *pos;
+  char		*name = NULL;
+
+  if (*pos >= UQRR_DATA_LENGTH(rr)) {
+    *errcode = ERR_MALFORMED_REQUEST;
+    return (NULL);
+  }
+  if (!(name = (char*)name_unencode2((uchar*)t->query, t->len, &cur, errcode)))
+    return (NULL);
+  if (cur > rdstart + UQRR_DATA_LENGTH(rr)) {			/* Name ran past the RDATA */
+    RELEASE(name);
+    *errcode = ERR_MALFORMED_REQUEST;
+    return (NULL);
+  }
+  *pos = cur - rdstart;
+  return (name);
+}
+/*--- update_rdata_name() -----------------------------------------------------------------------*/
+
+
+/**************************************************************************************************
 	UPDATE_GET_RR_DATA
 	Sets 'data' and 'aux'.
 	Returns 0 on success, -1 on error.
@@ -491,6 +523,7 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
   unsigned char	*src = (unsigned char*)UQRR_DATA_VALUE(rr);
   unsigned char	*end = (unsigned char*)(UQRR_DATA_VALUE(rr) + UQRR_DATA_LENGTH(rr));
   task_error_t	errcode = 0;
+  size_t	pos = 0;					/* Offset within the RDATA */
 
   *edata = NULL;
   *edatalen = 0;
@@ -518,7 +551,7 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
     break;
 
   case DNS_QTYPE_NS:
-    if (!(*data = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode)))
+    if (!(*data = update_rdata_name(t, rr, &pos, &errcode)))
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
     *datalen = strlen(*data);
     break;
@@ -532,7 +565,7 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
     return (TASK_FAILED);
 
   case DNS_QTYPE_CNAME:
-    if (!(*data = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode)))
+    if (!(*data = update_rdata_name(t, rr, &pos, &errcode)))
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
     *datalen = strlen(*data);
     break;
@@ -562,7 +595,7 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
     return (TASK_FAILED);
 
   case DNS_QTYPE_PTR:
-    if (!(*data = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode)))
+    if (!(*data = update_rdata_name(t, rr, &pos, &errcode)))
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
     *datalen = strlen(*data);
     break;
@@ -598,8 +631,11 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
     return (TASK_FAILED);
 
   case DNS_QTYPE_MX:
+    if (UQRR_DATA_LENGTH(rr) < SIZE16)
+      return formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
     DNS_GET16(*aux, src);
-    if (!(*data = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode)))
+    pos = SIZE16;
+    if (!(*data = update_rdata_name(t, rr, &pos, &errcode)))
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
     *datalen = strlen(*data);
     break;
@@ -615,9 +651,9 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
   case DNS_QTYPE_RP: {
     char *data1, *data2;
 
-    if (!(data1 = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode)))
+    if (!(data1 = update_rdata_name(t, rr, &pos, &errcode)))
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
-    if (!(data2 = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode))) {
+    if (!(data2 = update_rdata_name(t, rr, &pos, &errcode))) {
       RELEASE(data1);
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
     }
@@ -700,11 +736,14 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
     uint16_t weight, port;
     char *data1;
 
+    if (UQRR_DATA_LENGTH(rr) < SIZE16 * 3)
+      return formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
     DNS_GET16(*aux, src);
     DNS_GET16(weight, src);
     DNS_GET16(port, src);
+    pos = SIZE16 * 3;
 
-    if (!(data1 = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode)))
+    if (!(data1 = update_rdata_name(t, rr, &pos, &errcode)))
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
 
     *datalen = ASPRINTF(data, "%u %u %s", weight, port, data1);

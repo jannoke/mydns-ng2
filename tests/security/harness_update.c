@@ -102,5 +102,56 @@ main(void) {
     free(buf);
   }
 
+  { /* RDATA names: build "header | zone example. SOA IN | RR" and parse the RR's data. */
+    static const unsigned char hdr_zone[] = {
+      0,0, 0x28,0, 0,1, 0,0, 0,1, 0,0,				/* header: UPDATE, 1 zone, 1 update */
+      7,'e','x','a','m','p','l','e',0, 0,6, 0,1 };		/* zone example. SOA IN (offset 12) */
+    struct { const char *id, *what; unsigned char rr[32]; size_t rrlen; int ok; const char *want; uint32_t aux; }
+    cases[] = {
+      { "N1", "MX name compressed into the zone name decodes",
+	{ 0xC0,12, 0,15, 0,1, 0,0,0,60, 0,9,  0,10, 4,'m','a','i','l', 0xC0,12 }, 22, 1,
+	"mail.example.", 10 },
+      { "N2", "CNAME name running past RDLENGTH is rejected",
+	{ 0xC0,12, 0,5, 0,1, 0,0,0,60, 0,3,  4,'w','w','w','w',0 }, 18, 0, NULL, 0 },
+      { "N3", "SRV shorter than its fixed fields is rejected",
+	{ 0xC0,12, 0,33, 0,1, 0,0,0,60, 0,4,  0,1, 0,2 }, 16, 0, NULL, 0 },
+      { "N4", "MX shorter than its preference field is rejected",
+	{ 0xC0,12, 0,15, 0,1, 0,0,0,60, 0,1,  0 }, 13, 0, NULL, 0 },
+    };
+    size_t c;
+
+    for (c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+      unsigned char msg[64];
+      size_t len = sizeof(hdr_zone) + cases[c].rrlen;
+      TASK *t = new_task();
+      char *data = NULL, *edata = NULL;
+      size_t datalen = 0, edatalen = 0;
+      uint32_t aux = 0;
+      taskexec_t res;
+      UQRR urr;
+      int ok;
+
+      memcpy(msg, hdr_zone, sizeof(hdr_zone));
+      memcpy(msg + sizeof(hdr_zone), cases[c].rr, cases[c].rrlen);
+      t->query = (char *)exact_copy(msg, len);
+      t->len = len;
+      memset(&urr, 0, sizeof(urr));
+      if (!update_gobble_rr(t, (uchar *)t->query, len, (uchar *)t->query + sizeof(hdr_zone), &urr)) {
+	check(0, cases[c].id, "(RR itself failed to parse)");
+	continue;
+      }
+      res = update_get_rr_data(t, &urr, &data, &datalen, &edata, &edatalen, &aux);
+      if (cases[c].ok)
+	ok = res >= 0 && data
+	  && !strcmp(data, cases[c].want) && aux == cases[c].aux;
+      else
+	ok = (res < 0 || !data);
+      check(ok, cases[c].id, cases[c].what);
+      RELEASE(data);
+      free(t->query);
+      RELEASE(t);
+    }
+  }
+
   return failures();
 }
