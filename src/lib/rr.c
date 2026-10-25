@@ -328,18 +328,10 @@ mydns_rr_parse_naptr(const char *origin, MYDNS_RR *rr) {
 
 static inline int
 mydns_rr_parse_txt(const char *origin, MYDNS_RR *rr) {
-  int datalen = __MYDNS_RR_DATA_LENGTH(rr);
-  char *data = __MYDNS_RR_DATA_VALUE(rr);
+  /* Strings longer than DNS_MAXTXTELEMLEN are fine: reply_add_txt() splits them into
+     <=255-octet <character-string>s on the wire, so only the total length is limited. */
+  if (__MYDNS_RR_DATA_LENGTH(rr) > DNS_MAXTXTLEN) return (-1);
 
-  if (datalen > DNS_MAXTXTLEN) return (-1);
-
-  while (datalen > 0) {
-    size_t elemlen = strlen(data);
-    if (elemlen > DNS_MAXTXTELEMLEN) return (-1);
-    data = &data[elemlen+1];
-    datalen -= elemlen + 1;
-  }
-  
   return 0;
 }
 
