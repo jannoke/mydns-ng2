@@ -2341,13 +2341,13 @@ dns_update(TASK *t) {
   /* Try to load SOA for zone */
   if (mydns_soa_load(sql, &soa, t->qname) < 0) {
     dnserror(t, DNS_RCODE_SERVFAIL, ERR_DB_ERROR);
-    return (TASK_FAILED);
+    goto dns_update_error;
   }
 
   /* If there's no such zone, say REFUSED rather than NOTAUTH, to prevent "zone mining" */
   if (!soa) {
     dnserror(t, DNS_RCODE_REFUSED, ERR_ZONE_NOT_FOUND);
-    return (TASK_FAILED);
+    goto dns_update_error;
   }
 
 #if DEBUG_ENABLED && DEBUG_UPDATE
@@ -2364,12 +2364,12 @@ dns_update(TASK *t) {
    */
   if(!are_we_master(t, soa)) {
     dnserror(t, DNS_RCODE_NOTAUTH, ERR_NO_UPDATE);
-    return (TASK_FAILED);
+    goto dns_update_error;
   }
 
   /* Check the optional 'update' column if it exists */
   if (check_update(t, soa) != 0) {
-    return (TASK_FAILED);
+    goto dns_update_error;
   }
 
   /* Parse the update query */
@@ -2439,8 +2439,11 @@ dns_update(TASK *t) {
   return (TASK_EXECUTED);
 
 dns_update_error:
+  /* Every failure must still produce a reply: returning before build_reply() left
+     t->reply empty and the client got a zero-length datagram */
   build_reply(t, 1);
-  free_uq(q);
+  if (q)
+    free_uq(q);
   mydns_soa_free(soa);
   return (TASK_FAILED);
 }
