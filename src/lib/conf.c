@@ -146,6 +146,7 @@ static CONF defConfig[] = {
   {	"servers",		V_("1"),				N_("Number of servers to run"),							NULL,		0,		NULL	},
   {	"recursive",		V_(""),					N_("Location of recursive resolver"),						NULL,		0,		NULL	},
   {	"recursive-timeout",	V_("1"),				N_("Number of seconds before first retry"),					NULL,		0,		NULL	},
+  {	"recursive-connect-timeout", V_("1"),				N_("Number of seconds to wait for a TCP connection to the recursive server"),	NULL,		0,		NULL	},
   {	"recursive-retries",	V_("5"),				N_("Number of retries before abandoning recursion"),				NULL,		0,		NULL	},
   {	"recursive-algorithm",	V_("linear"),				N_("Recursion retry algorithm one of: linear, exponential, progressive"),	NULL,		0,		NULL	},
   {	"allow-axfr",		V_("no"),				N_("Should AXFR be enabled?"),							NULL,		0,		NULL	},
@@ -401,6 +402,7 @@ static void
 conf_set_recursive(void) {
   char		*c;
   const char	*address = conf_get(&Conf, "recursive", NULL);
+  const char	*value = NULL;
   char		addr[512];
   int		port = 53;
 
@@ -454,10 +456,14 @@ conf_set_recursive(void) {
 
   if (!forward_recursive) return;
 
-  recursion_timeout = atou(conf_get(&Conf, "recursive-timeout", NULL));
-  recursion_connect_timeout = atou(conf_get(&Conf, "recursive-connect-timeout", NULL));
-  recursion_retries = atou(conf_get(&Conf, "recursive-retries", NULL));
-  recursion_algorithm = conf_get(&Conf, "recursive-algorithm", NULL);
+  if ((value = conf_get(&Conf, "recursive-timeout", NULL)))
+    recursion_timeout = atou(value);
+  if ((value = conf_get(&Conf, "recursive-connect-timeout", NULL)))
+    recursion_connect_timeout = atou(value);
+  if ((value = conf_get(&Conf, "recursive-retries", NULL)))
+    recursion_retries = atou(value);
+  if ((value = conf_get(&Conf, "recursive-algorithm", NULL)))
+    recursion_algorithm = value;
 
 }
 /*--- conf_set_recursive() ----------------------------------------------------------------------*/
