@@ -169,6 +169,7 @@ typedef struct _named_task {
   taskpriority_t	priority;
 
   uint16_t		internal_id;		/* Internal task ID */
+  uint16_t		fwd_id;			/* Random message id of our query to the recursive forwarder (0 = none) */
   taskstat_t		status;			/* Current status of query */
   time_t		timeout;		/* Time task expires (timeout) */
 
