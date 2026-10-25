@@ -24,6 +24,18 @@
 CONF		*Conf = (CONF *)NULL;			/* Config options */
 
 /**************************************************************************************************
+	CONF_NAME_MATCHES
+	Returns nonzero if config item `c' is the option called `name' (or has it as its altname).
+	Option names must match exactly: a prefix match would make e.g. "recursive-timeout" or
+	"notify-source6" find the "recursive" or "notify-source" item instead.
+**************************************************************************************************/
+static int
+conf_name_matches(const CONF *c, const char *name) {
+  return ((c->name && !strcasecmp(c->name, name))
+	  || (c->altname && !strcasecmp(c->altname, name)));
+}
+
+/**************************************************************************************************
 	CONF_TRIM_COMMENTS
 	Trim comments from a line, obeying escape characters.
 **************************************************************************************************/
@@ -32,7 +44,7 @@ conf_trim_comments(char *s) {
   register char *c;
 
   for (c = s; *c; c++) {
-    if (*c == '\\')
+    if (*c == '\\' && c[1])
       c++;
     else if (c[0] == '#' || (c[0] == '/' && (c[1] == '*' || c[1] == '/'))) {
       *c = '\0';
@@ -68,7 +80,7 @@ conf_get_option(char *str, char **namep, char **valuep) {
       continue;
     }
 
-    if (*c == '\\')
+    if (*c == '\\' && c[1])
       c++;
 
     if (!got_equal) {
@@ -120,7 +132,7 @@ conf_clobber(CONF **confp, const char *name, const char *value) {
     return;
 
   for (c = conf; c; c = c->next)
-    if (c->name && !memcmp(c->name, name, strlen(c->name)) && c->defaulted) {
+    if (conf_name_matches(c, name) && c->defaulted) {
       RELEASE(c->value);
       c->value = STRDUP(value);
     }
@@ -143,7 +155,7 @@ conf_set(CONF **confp, const char *name, const char *value, int defaulted) {
 
   /* Try to find the specified option in the current list */
   for (c = conf; c; c = c->next)
-    if (c->name && !memcmp(c->name, name, strlen(c->name))) {
+    if (conf_name_matches(c, name)) {
       /* Found in current list; append field separator and value */
       if (!strcasecmp(c->name, "listen")
 	  || !strcasecmp(c->name, "no-listen")
@@ -185,8 +197,7 @@ conf_get(CONF **confp, const char *name, int *defaulted) {
     *defaulted = 1;
 
   for (c = conf; c; c = c->next)
-    if (!memcmp(c->name, name, strlen(c->name))
-	|| (c->altname && !memcmp(c->altname, name, strlen(c->name)))) {
+    if (conf_name_matches(c, name)) {
       if (defaulted)
 	*defaulted = c->defaulted;
       return (c->value);
