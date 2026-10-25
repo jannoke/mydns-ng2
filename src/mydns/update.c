@@ -191,24 +191,13 @@ check_update(TASK *t, MYDNS_SOA *soa) {
 
   ip = clientaddr(t);
 
-  /* If the 'soa' table does not have an 'update' column, listing access rules, allow
-     DNS UPDATE only from 127.0.0.1 and all local addresses */
+  /* If the 'soa' table does not have an 'update_acl' column listing access rules, allow
+     DNS UPDATE only from the loopback address. (MyDNS-NG also trusted every address of every
+     local interface - including public ones - which is far wider than "local clients" and
+     relies on the network to drop spoofed packets claiming those source addresses.) */
   if (!mydns_soa_use_update_acl) {
-    char **allLocalAddresses = all_interface_addresses();
-
-    if (allLocalAddresses) {
-      while(allLocalAddresses[0]) {
-	if (!strcmp(ip, allLocalAddresses[0])) {
-	  ok = 1;
-	  break;
-	}
-	allLocalAddresses = &allLocalAddresses[1];
-      }
-    }
-
-    if (ok || !strcmp(ip, "127.0.0.1")) {			/* OK from localhost */
+    if (!strcmp(ip, "127.0.0.1") || !strcmp(ip, "::1"))
       return 0;
-    }
     return dnserror(t, DNS_RCODE_REFUSED, ERR_NO_UPDATE);
   }
 
@@ -225,7 +214,9 @@ check_update(TASK *t, MYDNS_SOA *soa) {
   res = sql_query(sql, query, querylen);
   RELEASE(query);
   if (!res) {
-    ErrSQL(sql, "%s: %s", desctask(t), _("error loading DNS UPDATE access rules"));
+    /* ErrSQL() would terminate the whole server on a transient database error */
+    WarnSQL(sql, "%s: %s", desctask(t), _("error loading DNS UPDATE access rules"));
+    return dnserror(t, DNS_RCODE_SERVFAIL, ERR_DB_ERROR);
   }
 
   if ((row = sql_getrow(res, NULL))) {
@@ -242,12 +233,12 @@ check_update(TASK *t, MYDNS_SOA *soa) {
 	ok = 1;
     }
   }
+#if DEBUG_ENABLED && DEBUG_UPDATE
+  DebugX("update", 1, _("%s: checked DNS UPDATE access rule '%s' res = %s"), desctask(t),
+	 (row && row[0]) ? row[0] : "", (ok)?"OK":"FAILED");
+#endif
   sql_free(res);
 
-#if DEBUG_ENABLED && DEBUG_UPDATE
-  DebugX("update", 1, _("%s: checked DNS UPDATE access rule '%s' res = %s"), desctask(t), row[0],
-	 (ok)?"OK":"FAILED");
-#endif
   if (!ok)
     return dnserror(t, DNS_RCODE_REFUSED, ERR_NO_UPDATE);
 

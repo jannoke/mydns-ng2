@@ -153,5 +153,26 @@ main(void) {
     }
   }
 
+  { /* Without an update_acl column, only loopback may send UPDATEs - not every address of
+       every local interface, as before. (No database is touched on this path.) */
+    static const struct { const char *ip; int allowed; const char *id, *what; } acl[] = {
+      { "127.0.0.1", 1, "A1", "no update_acl column: 127.0.0.1 may UPDATE" },
+      { "192.0.2.5", 0, "A2", "no update_acl column: other addresses are refused" },
+    };
+    size_t i;
+
+    mydns_soa_use_update_acl = 0;
+    for (i = 0; i < sizeof(acl) / sizeof(acl[0]); i++) {
+      TASK *t = new_task();
+      MYDNS_SOA soa;
+
+      memset(&soa, 0, sizeof(soa));
+      inet_pton(AF_INET, acl[i].ip, &t->addr4.sin_addr);
+      t->addr4.sin_family = AF_INET;
+      check((check_update(t, &soa) == 0) == acl[i].allowed, acl[i].id, acl[i].what);
+      RELEASE(t);
+    }
+  }
+
   return failures();
 }
