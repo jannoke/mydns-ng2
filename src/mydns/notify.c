@@ -293,7 +293,7 @@ _notify_read(TASK *t, struct sockaddr_storage *from, socklen_t fromlen) {
 		} else if (from->ss_family == AF_INET6) {
 			if (memcmp(&((struct sockaddr_in6*)from)->sin6_addr,
 				&((struct sockaddr_in6*)slaveaddr)->sin6_addr,
-				sizeof(struct in6_addr) != 0))
+				sizeof(struct in6_addr)) != 0)
 			{
 				if (slave->replied) { slavecount--; }
 				continue;
@@ -354,7 +354,7 @@ notify_read(TASK *t) {
 
 		if (rv < 0) {
 			if (
-				(errno = EINTR)
+				(errno == EINTR)
 #ifdef EAGAIN
 				|| (errno == EAGAIN)
 #else
