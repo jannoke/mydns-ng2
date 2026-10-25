@@ -449,28 +449,31 @@ parse_update_query(TASK *t, UQ *q) {
 **************************************************************************************************/
 static char *
 text_retrieve(unsigned char **srcp, unsigned char *end, size_t *datalen, int one_word_only) {
-  size_t	n = 0;
-  int		x = 0;							/* Offset in 'data' */
-  char 		*data = NULL;
   unsigned char	*src = *srcp;
+  size_t	n = 0;						/* Offset in 'data' */
+  /*
+  ** The result never needs more room than the input: every length octet becomes at most one
+  ** NUL separator. Allocating that up front replaces the old grow-as-you-go logic, which did
+  ** not count the separators and wrote past the end of its buffer once there were 2+ strings,
+  ** and returned NULL (then dereferenced by HINFO) when there was no data at all.
+  */
+  char		*data = ALLOCATE((src < end ? (size_t)(end - src) : 0) + 1, char[]);
 
-  *datalen = 0;
+  while (src < end) {
+    size_t len = *src++;
 
-  for (n = 0; src < end; ) {
-    int len = *src++;
-
-    if (n >= *datalen) {
-      *datalen += len;
-      data = REALLOCATE(data, (*datalen)+1, char[]);
-    }
+    if (len > (size_t)(end - src))				/* Truncated string: take what's there */
+      len = end - src;
     if (n)
-      data[n++] = '\0';
-    for (x = 0; x < len && src < end; x++)
-      data[n++] = *src++;
+      data[n++] = '\0';					/* Separator between strings */
+    memcpy(&data[n], src, len);
+    n += len;
+    src += len;
     if (one_word_only)
       break;
   }
   data[n] = '\0';
+  *datalen = n;
   *srcp = src;
   return data;
 }
