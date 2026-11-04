@@ -30,14 +30,46 @@ static char *_sql_database = NULL;
 
 
 /**************************************************************************************************
+	SQL_SPLIT_HOST
+	Splits "host" or "host:port" into a copy of the host name and the port, as a number for
+	MySQL (0 = the default) and as a string for libpq (NULL = the default). `host' itself is
+	never modified: it's the saved copy that every reconnect uses. Free *name and *portstr
+	with sql_free_host().
+**************************************************************************************************/
+static void
+sql_split_host(const char *host, char **name, unsigned int *port, char **portstr) {
+  const char *colon = host ? strchr(host, ':') : NULL;
+
+  *name = NULL;
+  *port = 0;
+  *portstr = NULL;
+  if (!host)
+    return;
+  if (colon) {
+    *name = STRNDUP(host, colon - host);
+    *portstr = STRDUP(colon + 1);
+    *port = atoi(colon + 1);
+  } else {
+    *name = STRDUP(host);
+  }
+}
+
+static void
+sql_free_host(char **name, char **portstr) {
+  if (*name) RELEASE(*name);
+  if (*portstr) RELEASE(*portstr);
+}
+/*--- sql_split_host() --------------------------------------------------------------------------*/
+
+
+/**************************************************************************************************
 	SQL_OPEN
 	Connect to the database.  Errors fatal.
 **************************************************************************************************/
 void
 sql_open(const char *user, const char *password, const char *host, const char *database) {
-  char *portp = NULL;
+  char *hostname = NULL, *portstr = NULL;
   unsigned int port = 0;
-  char *host2 = NULL;
 
   /* Save connection information so that we can reconnect if necessary */
   if (_sql_user) RELEASE(_sql_user);
@@ -49,21 +81,10 @@ sql_open(const char *user, const char *password, const char *host, const char *d
   _sql_host = host ? STRDUP(host) : NULL;
   _sql_database = database ? STRDUP(database) : NULL;
 
-  if( host != NULL ) {
-    host2 = STRDUP( host );
-
-    if ((portp = strchr(host2, ':')) != NULL) {
-      port = atoi(portp + 1);
-      *portp = '\0';
-      portp = portp + 1;
-    }
-  }
+  sql_split_host(host, &hostname, &port, &portstr);
 
 #if USE_PGSQL
-  char *portp2;
-//char *host2 = NULL;
-
-  sql = PQsetdbLogin(host2 ? host2 : host, portp, NULL, NULL, database, user, password);
+  sql = PQsetdbLogin(hostname, portstr, NULL, NULL, database, user, password);
   if (PQstatus(sql) == CONNECTION_BAD) {
     char *errmsg = PQerrorMessage(sql), *c, *out = NULL;
 
@@ -95,12 +116,11 @@ sql_open(const char *user, const char *password, const char *host, const char *d
 #if MYSQL_VERSION_ID > 50012
   mysql_options(sql, MYSQL_OPT_RECONNECT, "1");
 #endif
-  if (!(mysql_real_connect(sql, host2 ? host2 : host, user, password, database, port, NULL, 0)))
+  if (!(mysql_real_connect(sql, hostname, user, password, database, port, NULL, 0)))
     ErrSQL(sql, _("Error connecting to MySQL server at %s"), host);
 #endif
 
-  if( host2 )
-    RELEASE( host2 );
+  sql_free_host(&hostname, &portstr);
 }
 /*--- sql_open() --------------------------------------------------------------------------------*/
 
@@ -112,16 +132,17 @@ sql_open(const char *user, const char *password, const char *host, const char *d
 void
 sql_reopen(void) {
   SQL *new_sql = NULL;
-  char *portp = NULL;
+  char *hostname = NULL, *portstr = NULL;
   unsigned int port = 0;
 
-  if (_sql_host && (portp = strchr(_sql_host, ':'))) {
-    port = atoi(portp + 1);
-    *portp = '\0';
-  }
+#if !USE_PGSQL
+  if (!mysql_ping(sql)) return;
+#endif
+
+  sql_split_host(_sql_host, &hostname, &port, &portstr);
 
 #if USE_PGSQL
-  new_sql = PQsetdbLogin(_sql_host, portp, NULL, NULL, _sql_database, _sql_user, _sql_password);
+  new_sql = PQsetdbLogin(hostname, portstr, NULL, NULL, _sql_database, _sql_user, _sql_password);
   if (PQstatus(new_sql) == CONNECTION_BAD) {
     if (new_sql)
       PQfinish(new_sql);
@@ -130,14 +151,15 @@ sql_reopen(void) {
     if (PQstatus(new_sql) == CONNECTION_BAD) {
       if (new_sql)
 	PQfinish(new_sql);
+      sql_free_host(&hostname, &portstr);
       return;
     }
   }
 #else
-  if (!mysql_ping(sql)) return;
   new_sql = ALLOCATE(sizeof(*new_sql), MYSQL);
   if (!mysql_init(new_sql)) {
     RELEASE(new_sql);
+    sql_free_host(&hostname, &portstr);
     return;
   }
 #if MYSQL_VERSION_ID > 32349
@@ -146,17 +168,17 @@ sql_reopen(void) {
 #if MYSQL_VERSION_ID > 50012
   mysql_options(new_sql, MYSQL_OPT_RECONNECT, "1");
 #endif
-  if (!(mysql_real_connect(new_sql, _sql_host, _sql_user, _sql_password, _sql_database, port, NULL, 0))) {
+  if (!(mysql_real_connect(new_sql, hostname, _sql_user, _sql_password, _sql_database, port, NULL, 0))) {
     mysql_close(new_sql);
+    RELEASE(new_sql);
+    sql_free_host(&hostname, &portstr);
     return;
   }
 #endif
 
+  sql_free_host(&hostname, &portstr);
   sql_close(sql);
   sql = new_sql;
-
-  if (portp)
-    *portp = ':';
 }
 /*--- sql_reopen() ------------------------------------------------------------------------------*/
 
