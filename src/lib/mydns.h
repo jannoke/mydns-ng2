@@ -606,6 +606,7 @@ extern int		sql_connect(const char *user, const char *password, const char *host
 				    const char *database, char **error);
 extern void		sql_open(const char *user, const char *password, const char *host, const char *database);
 extern void		sql_reopen(void);
+extern const char	*sql_host_in_use(void);
 extern void		_sql_close(SQL *);
 #define			sql_close(p) if ((p)) _sql_close((p)), (p) = NULL
 extern int		sql_nrquery(SQL *, const char *query, size_t querylen);

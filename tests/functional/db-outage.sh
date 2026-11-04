@@ -185,5 +185,52 @@ sed -i '/^db-connect-wait/d' /etc/mydns-outage.conf
 db_start
 grep -q 'runtime error\|ERROR: AddressSanitizer' "$SLOG" && { echo "OUTAGE FAIL sanitizer report in $SLOG"; fail=1; }
 
+if [ "$DBTYPE" = mysql ]; then
+  echo "-- failover between two servers (db-host = primary, second)"
+  PORT2=3308 D2=/tmp/mydns-db2 FLOG=/t/db-failover-$DBTYPE.log
+  db2()       { mysql --socket=$D2.sock "$@"; }
+  db2_start() { (mariadbd --no-defaults --user=mysql --datadir=$D2 --port=$PORT2 --bind-address=127.0.0.1 \
+                  --socket=$D2.sock --pid-file=$D2.pid >/dev/null 2>&1 &)
+                for i in $(seq 30); do mysqladmin --socket=$D2.sock ping >/dev/null 2>&1 && return; sleep 1; done
+                echo "second mariadbd didn't start"; exit 2; }
+  db2_stop()  { mysqladmin --socket=$D2.sock shutdown >/dev/null 2>&1; }
+  db1_stop()  { mysqladmin shutdown >/dev/null 2>&1; for i in $(seq 30); do mysqladmin ping >/dev/null 2>&1 || return; sleep 0.5; done; }
+
+  db2_stop; rm -rf $D2
+  mariadb-install-db --no-defaults --user=mysql --datadir=$D2 >/dev/null 2>&1 || { echo "mariadb-install-db failed"; exit 2; }
+  db2_start
+  db2 -e "CREATE DATABASE mydns; CREATE USER mydns@127.0.0.1 IDENTIFIED BY 'mydns'; GRANT ALL ON mydns.* TO mydns@127.0.0.1;"
+  mysqldump mydns | db2 mydns
+  # Names only the second server has, to tell which one answered
+  db2 mydns -e "INSERT INTO rr (zone,name,type,data,aux,ttl) SELECT id,'on2','A','192.0.2.22',0,3600 FROM soa;
+                INSERT INTO rr (zone,name,type,data,aux,ttl) SELECT id,'stay','A','192.0.2.23',0,3600 FROM soa;
+                INSERT INTO rr (zone,name,type,data,aux,ttl) SELECT id,'chk','A','192.0.2.24',0,3600 FROM soa;"
+
+  sed "s/^db-host = .*/db-host = 127.0.0.1:$PORT, 127.0.0.1:$PORT2/" /etc/mydns-outage.conf > /etc/mydns-failover.conf
+  pkill -x mydns; sleep 0.3
+  (setsid src/mydns/mydns -c /etc/mydns-failover.conf > "$FLOG" 2>&1 &)
+  for i in $(seq 40); do dig +short +time=1 +tries=1 @127.0.0.1 www.example.test A | grep -qx 192.0.2.10 && break; sleep 0.25; done
+  expect "baseline on the primary"            NOERROR  1 www.example.test
+  expect "the primary lacks the second's names" NXDOMAIN 1 chk.example.test
+
+  db1_stop
+  expect "primary stopped: fails over at once" NOERROR 2 on2.example.test
+  expect "and keeps using the second"         NXDOMAIN 1 f1.example.test
+  db_start
+  expect "no failback while the second works" NOERROR  1 stay.example.test
+
+  kill -STOP $(cat $D2.pid)
+  expect "second hangs: back to the primary"  NXDOMAIN $((TIMEOUT + 2)) f2.example.test
+  expect "and stays there"                    NXDOMAIN 1 f3.example.test
+  kill -CONT $(cat $D2.pid)
+
+  pkill -x mydns; sleep 0.3
+  ok "logs the switch to the second"  grep -q "using database server 127.0.0.1:$PORT2" "$FLOG"
+  ok "logs the switch back"           grep -q "using database server 127.0.0.1:$PORT\$" "$FLOG"
+  ok "no outage: queries never failed for db-retry-interval" test "$(grep -c 'database connection failed' "$FLOG")" = 0
+  grep -q 'runtime error\|ERROR: AddressSanitizer' "$FLOG" && { echo "OUTAGE FAIL sanitizer report in $FLOG"; fail=1; }
+  db2_stop
+fi
+
 [ $fail = 0 ] && echo "== OUTAGE OK ($DBTYPE) ==" || { echo "== OUTAGE FAILURES ($DBTYPE) =="; sed 's/^/    log: /' "$LOG" | tail -15; }
 exit $fail

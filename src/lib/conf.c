@@ -115,7 +115,7 @@ char		*dn_default_ns = NULL;			/* Default NS for directNIC */
 static CONF defConfig[] = {
 /* name				value					desc										altname		defaulted	next	*/
   {	"-",			NULL,					N_("DATABASE INFORMATION"),							NULL,		0,		NULL	},
-  {	"db-host",		V_("localhost"),			N_("SQL server hostname"),							NULL,		0,		NULL	},
+  {	"db-host",		V_("localhost"),			N_("SQL server hostname[:port], comma-separated for failover"),		NULL,		0,		NULL	},
   {	"db-user",		V_("username"),				N_("SQL server username"),							NULL,		0,		NULL	},
   {	"db-password",		V_("password"),				N_("SQL server password"),							NULL,		0,		NULL	},
   {	"database",		V_(PACKAGE_NAME),			N_("MyDNS database name"),							NULL,		0,		NULL	},

@@ -110,5 +110,57 @@ main(void) {
     check(!res && sql_unavailable(), "W5", "a failed retry opens the next window");
   }
 
+  { /* db-host as a list of servers */
+    char *h0 = sql_host_nth(" a:1 , ,b ", 0), *h1 = sql_host_nth(" a:1 , ,b ", 1);
+    char *h2 = sql_host_nth(" a:1 , ,b ", 2);
+
+    check(h0 && !strcmp(h0, "a:1") && h1 && !strcmp(h1, "b") && !h2, "L1",
+	  "entries are trimmed and blank ones skipped");
+    check(sql_host_count(" a:1 , ,b ") == 2 && sql_host_count("db") == 1
+	  && sql_host_count(NULL) == 0 && sql_host_count(" , ") == 0, "L2", "and counted");
+    if (h0) RELEASE(h0);
+    if (h1) RELEASE(h1);
+  }
+
+  { /* None of the servers answers */
+    const char *list = "127.0.0.1:1, 127.0.0.1:2";
+    char *error = NULL;
+    int rv;
+
+    sql_close(sql);
+    rv = sql_connect("mydns", "x", list, "mydns", &error);
+    check(rv == -1 && !sql && error && strstr(error, "127.0.0.1:1:") && strstr(error, "127.0.0.1:2:"),
+	  "L3", "connecting fails with every server's reason");
+    check(!strcmp(_sql_host, list), "L4", "and keeps the list as it was");
+    if (error) RELEASE(error);
+
+    /* A lost connection with several servers: fail over before failing queries. */
+    sql = refused_handle();
+    sql_down_since = sql_retry_at = 0;
+    sql_connection_lost("gone");
+    check(sql_need_failover && !sql_unavailable(), "L5",
+	  "losing one of several servers means trying the others, not failing queries");
+    _sql_host_cur = 1;
+    sql_reopen();
+    check(!sql_need_failover && sql_unavailable() && sql && _sql_host_cur == 1, "L6",
+	  "when none answers, queries fail for db-retry-interval and the handle stays");
+
+    sql_down_since = sql_retry_at = 0;
+    sql_need_failover = 1;
+    {
+      SQL_RES *res = sql_query(sql, "SELECT 1", 8);
+
+      check(!res && !sql_need_failover && sql_unavailable(), "L7",
+	    "a query after a lost server tries the others first");
+    }
+
+    /* With one server, a lost connection fails queries at once, as before. */
+    RELEASE(_sql_host);
+    _sql_host = STRDUP("127.0.0.1:1");
+    sql_down_since = sql_retry_at = 0;
+    sql_connection_lost("gone");
+    check(!sql_need_failover && sql_unavailable(), "L8", "one server: no failover, the retry window opens");
+  }
+
   return failures();
 }
