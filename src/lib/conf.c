@@ -119,6 +119,8 @@ static CONF defConfig[] = {
   {	"db-user",		V_("username"),				N_("SQL server username"),							NULL,		0,		NULL	},
   {	"db-password",		V_("password"),				N_("SQL server password"),							NULL,		0,		NULL	},
   {	"database",		V_(PACKAGE_NAME),			N_("MyDNS database name"),							NULL,		0,		NULL	},
+  {	"db-timeout",		V_("3"),				N_("Seconds to wait for the database to connect or answer (0 = no limit)"),	NULL,		0,		NULL	},
+  {	"db-retry-interval",	V_("10"),				N_("Seconds to fail queries at once after losing the database"),		NULL,		0,		NULL	},
 
   {	"-",			NULL,					N_("GENERAL OPTIONS"),								NULL,		0,		NULL	},
 
@@ -533,6 +535,11 @@ load_config(void) {
 
   /* Set global options */
   task_timeout = atou(conf_get(&Conf, "timeout", NULL));
+
+  sql_timeout = atoi(conf_get(&Conf, "db-timeout", NULL));
+  if (sql_timeout < 0) sql_timeout = 0;
+  sql_retry_interval = atoi(conf_get(&Conf, "db-retry-interval", NULL));
+  if (sql_retry_interval < 0) sql_retry_interval = 0;
 
   axfr_enabled = GETBOOL(conf_get(&Conf, "allow-axfr", NULL));
   Verbose(_("AXFR is %senabled"), (axfr_enabled)?"":_("not "));

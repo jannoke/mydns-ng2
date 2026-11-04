@@ -38,3 +38,5 @@ texinfo.tex
 version.texi
 .env
 /dist/
+# logs written by tests/functional/*.sh
+tests/functional/*.log

@@ -67,6 +67,23 @@ Read resource record information from the database called \fIname\fP.
 The specified \fBdbuser\fP must have \fBSELECT\fP privileges on the
 specified database.
 
+.IP "\fBdb-timeout\fP = \fIseconds\fP (`\fI3\fP')"
+Wait at most \fIseconds\fP for the database server to accept a connection
+or to answer a query. A query that takes longer fails, and so does the lookup
+that needed it (\fBSERVFAIL\fP). \fB0\fP waits as long as the operating
+system does, which can be minutes when the server hangs. It must be longer
+than the slowest query mydns runs, such as IXFR garbage collection on a large
+table. With Oracle's MySQL client library a read can take three times this
+long, since it retries twice; MariaDB's and PostgreSQL's don't.
+
+.IP "\fBdb-retry-interval\fP = \fIseconds\fP (`\fI10\fP')"
+After the connection to the database fails (refused, lost, or no answer
+within \fBdb-timeout\fP), queries fail at once for \fIseconds\fP instead
+of each waiting for the timeout again; then the next query tries the
+database again. Cached answers are still served meanwhile. Each server
+process handles one query at a time, so without this a hanging database
+would hold up every lookup.
+
 
 .\"--------------------------------------------------------------------------
 .\" GENERAL OPTIONS
