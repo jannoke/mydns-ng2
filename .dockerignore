@@ -1,0 +1,22 @@
+.git
+HANDOFF.md
+Dockerfile
+docker-compose.yml
+.env
+tests/functional/asan
+tests/functional/*.log
+# build output of an in-tree build: the image bootstraps from scratch
+**/*.o
+**/*.a
+**/.deps
+**/Makefile
+**/Makefile.in
+autom4te.cache
+aclocal.m4
+configure
+config.h
+config.log
+config.status
+libtool
+stamp-h1
+src/mydns/mydns
