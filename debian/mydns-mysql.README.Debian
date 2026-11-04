@@ -1,0 +1,30 @@
+MyDNS for Debian (MySQL/MariaDB backend)
+========================================
+
+The service is installed and enabled but not started, because it needs a
+database first.
+
+1. Create the database and a user for mydns:
+
+     mysql -e "CREATE DATABASE mydns;
+               CREATE USER mydns@localhost IDENTIFIED BY 'secret';
+               GRANT SELECT ON mydns.* TO mydns@localhost;"
+
+   Grant INSERT, UPDATE, DELETE as well if you enable DNS UPDATE.
+
+2. Create the tables:
+
+     mydns --create-tables | mysql mydns
+
+   For long or multi-string TXT records, widen rr.data:
+
+     mysql mydns -e "ALTER TABLE rr MODIFY data VARBINARY(1024) NOT NULL"
+
+3. Put the credentials into /etc/mydns.conf (mode 0600, root only: mydns
+   reads it before dropping privileges to the _mydns user).
+
+4. Start it:
+
+     systemctl start mydns
+
+Logs go to syslog (the journal): journalctl -u mydns

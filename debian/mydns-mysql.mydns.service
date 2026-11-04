@@ -1,0 +1,22 @@
+[Unit]
+Description=MyDNS database-driven DNS server
+Documentation=man:mydns(8) man:mydns.conf(5)
+After=network-online.target mariadb.service mysql.service
+Wants=network-online.target
+ConditionPathExists=/etc/mydns.conf
+
+[Service]
+Type=simple
+# Starts as root to read /etc/mydns.conf (mode 0600) and bind port 53,
+# then drops to the "user" and "group" from the config.
+ExecStart=/usr/sbin/mydns
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

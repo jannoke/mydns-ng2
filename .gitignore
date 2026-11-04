@@ -37,3 +37,4 @@ stamp-vti
 texinfo.tex
 version.texi
 .env
+/dist/

@@ -1,4 +1,13 @@
+Packages:
 
-Currently the only package is RedHat RPM.
+Debian 13 (trixie), MySQL/MariaDB backend:
 
-`make rpm'	Build RPM.
+  pkg/build-deb.sh [output-dir]
+
+  Builds mydns-mysql_<version>_amd64.deb in a debian:13 container (needs
+  docker; DOCKER=podman works too) and writes it to ./dist. The packaging is
+  in debian/; it can also be built directly on a Debian 13 host with
+  "dpkg-buildpackage -us -uc -b". After installing, see
+  /usr/share/doc/mydns-mysql/README.Debian.
+
+RedHat RPM (old, unmaintained): pkg/mydns-mysql.spec, pkg/mydns-postgres.spec.
