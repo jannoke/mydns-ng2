@@ -544,7 +544,8 @@ zone_cache_find(TASK *t, uint32_t zone, char *origin, dns_qtype_t type,
     if (mydns_soa_load(sql, &soa, name) != 0) {
       sql_reopen();
       if (mydns_soa_load(sql, &soa, name) != 0) {
-	WarnSQL(sql, "%s: %s", name, _("error loading SOA"));
+	if (!sql_unavailable())				/* else sql.c logged the outage once */
+	  WarnSQL(sql, "%s: %s", name, _("error loading SOA"));
 	*errflag = 1;
 	return (NULL);
       }
@@ -573,8 +574,9 @@ zone_cache_find(TASK *t, uint32_t zone, char *origin, dns_qtype_t type,
     if (mydns_rr_load_active(sql, &rr, zone, type, name, origin) != 0) {
       sql_reopen();
       if (mydns_rr_load_active(sql, &rr, zone, type, name, origin) != 0) {
-	WarnSQL(sql, _("error finding %s type resource records for name `%s' in zone %u"),
-		mydns_qtype_str(type), name, zone);
+	if (!sql_unavailable())				/* else sql.c logged the outage once */
+	  WarnSQL(sql, _("error finding %s type resource records for name `%s' in zone %u"),
+		  mydns_qtype_str(type), name, zone);
 	sql_reopen();
 	*errflag = 1;
 	return (NULL);

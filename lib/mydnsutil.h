@@ -160,7 +160,6 @@ extern int strcoll ();
 
 #if USE_PGSQL
 #	include <libpq-fe.h>
-#       include <pgtypes_timestamp.h>
 
 #ifdef PGSQL_VERSION
 #	define  SQL_VERSION_STR	"PostgreSQL " PGSQL_VERSION

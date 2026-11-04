@@ -571,6 +571,12 @@ named_cleanup(int signo) {
 
 }
 
+/* For code outside main.c that waits (db.c's connect retries): has a signal asked us to stop? */
+int
+named_shutting_down(void) {
+  return (shutting_down);
+}
+
 void
 named_shutdown(int signo) {
   int n = 0;

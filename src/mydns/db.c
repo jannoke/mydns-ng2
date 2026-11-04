@@ -24,17 +24,57 @@
 #define	DEBUG_DB	1
 
 /**************************************************************************************************
+	DB_OPEN
+	Connect to the database, retrying while it isn't there yet (db-connect-wait): at startup,
+	in servers the master respawns, and in AXFR children. Exiting instead made a database that
+	starts after mydns (or restarts) fatal, and turned a dead server child into a tight
+	fork/exit loop, since the master respawns children at once. Retries back off from 1 to
+	30 seconds; a signal that asks the server to stop ends the wait.
+**************************************************************************************************/
+#define DB_RETRY_MAX	30
+
+static void
+db_open(void) {
+  const char *host = conf_get(&Conf, "db-host", NULL);
+  const char *password = conf_get(&Conf, "db-password", NULL);
+  const char *user = conf_get(&Conf, "db-user", NULL);
+  const char *database = conf_get(&Conf, "database", NULL);
+  int wait = atoi(conf_get(&Conf, "db-connect-wait", NULL));
+  time_t start = time(NULL);
+  unsigned int delay = 1, failures = 0;
+  char *error = NULL;
+
+  while (sql_connect(user, password, host, database, &error)) {
+    long elapsed = (long)(time(NULL) - start);
+
+    if (wait < 0)
+      Errx("%s", error);
+    if (wait > 0 && elapsed + (long)delay > wait)
+      Errx(_("%s (gave up after %ld s, db-connect-wait)"), error, elapsed);
+    Warnx(_("%s; retrying in %u s"), error, delay);
+    RELEASE(error);
+    failures++;
+
+    sleep(delay);					/* a signal ends it early */
+    if (named_shutting_down()) {
+      Notice(_("stopped while waiting for the database"));
+      exit(EXIT_SUCCESS);
+    }
+    delay = (delay * 2 > DB_RETRY_MAX) ? DB_RETRY_MAX : delay * 2;
+  }
+  if (failures)
+    Notice(_("connected to the database after %ld s"), (long)(time(NULL) - start));
+}
+/*--- db_open() ---------------------------------------------------------------------------------*/
+
+
+/**************************************************************************************************
 	DB_CONNECT
 	Connect to the database.
 **************************************************************************************************/
 void
 db_connect(void) {
-  const char *host = conf_get(&Conf, "db-host", NULL);
-  const char *password = conf_get(&Conf, "db-password", NULL);
-  const char *user = conf_get(&Conf, "db-user", NULL);
-  const char *database = conf_get(&Conf, "database", NULL);
-
-  sql_open(user, password, host, database);
+  db_open();
 }
 /*--- db_connect() ------------------------------------------------------------------------------*/
 
@@ -312,12 +352,9 @@ db_check_ptr_table(const char *database) {
 **************************************************************************************************/
 void
 db_verify_tables(void) {
-  const char *host = conf_get(&Conf, "db-host", NULL);
   const char *database = conf_get(&Conf, "database", NULL);
-  const char *password = conf_get(&Conf, "db-password", NULL);
-  const char *user = conf_get(&Conf, "db-user", NULL);
 
-  sql_open(user, password, host, database);
+  db_open();
 
   /* XXX: Fix this - check existence of database etc */
 #ifndef DN_COLUMN_NAMES

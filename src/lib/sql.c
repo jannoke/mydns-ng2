@@ -28,16 +28,275 @@ static char *_sql_password = NULL;
 static char *_sql_host = NULL;
 static char *_sql_database = NULL;
 
+/* db-timeout and db-retry-interval, set by load_config() */
+int sql_timeout = 3;					/* Connect/read/write timeout, seconds (0 = none) */
+int sql_retry_interval = 10;				/* Seconds to fail at once after losing the server */
+
+/* State of the connection to the server, see sql_unavailable() */
+static time_t sql_down_since = 0;			/* When it was lost (sql_now(); 0 = it's fine) */
+static time_t sql_retry_at = 0;				/* Don't talk to the server before then */
+#if USE_PGSQL
+static int sql_pg_broken = 0;				/* Failed mid-query: needs a new connection */
+static int sql_pg_timed_out = 0;			/* ... because the server didn't answer */
+#endif
+
+
+/* A clock that setting the date can't move: the retry window and timeouts use it. */
+static long long
+sql_now_ms(void) {
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ((long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+#define sql_now() ((time_t)(sql_now_ms() / 1000))
+
 
 /**************************************************************************************************
-	SQL_OPEN
-	Connect to the database.  Errors fatal.
+	SQL_UNAVAILABLE
+	After a connection error (the server went away, refused, or didn't answer within
+	db-timeout), queries fail at once for db-retry-interval seconds instead of each one
+	waiting for the timeout again: a server that hangs would otherwise stall every lookup,
+	cached answers included, since the server handles one query at a time. Returns 1 while
+	that is the case, so callers can skip their own per-query error messages.
 **************************************************************************************************/
-void
-sql_open(const char *user, const char *password, const char *host, const char *database) {
-  char *portp = NULL;
+int
+sql_unavailable(void) {
+  return (sql_down_since && sql_now() < sql_retry_at);
+}
+
+static void
+sql_mark_down(const char *why) {
+  time_t now = sql_now();
+
+  sql_retry_at = now + (sql_retry_interval > 0 ? sql_retry_interval : 0);
+  if (!sql_down_since) {
+    sql_down_since = now ? now : 1;		/* 0 means "up" */
+    Warnx(_("database connection failed (%s); queries fail for %d s before reconnecting"),
+	  why, sql_retry_interval);
+  } else {
+    Warnx(_("database still unavailable after %ld s (%s)"), (long)(now - sql_down_since), why);
+  }
+}
+
+/* The server answered (with rows or an SQL error): the connection works. */
+static void
+sql_mark_up(void) {
+  if (sql_down_since) {
+    Notice(_("database connection restored after %ld s"), (long)(sql_now() - sql_down_since));
+    sql_down_since = 0;
+    sql_retry_at = 0;
+  }
+}
+/*--- sql_unavailable() -------------------------------------------------------------------------*/
+
+
+#if USE_PGSQL
+/* libpq's messages span lines and indent with tabs: make one log line of them. */
+static void
+sql_one_line(char *msg) {
+  char *c;
+
+  for (c = msg; *c; c++)
+    if (*c == '\r' || *c == '\n' || *c == '\t')
+      *c = ' ';
+  strtrim(msg);
+}
+
+
+/**************************************************************************************************
+	SQL_PG_CONNECT
+	PQsetdbLogin() takes no connect timeout, so connect with PQconnectdbParams(). NULL values
+	are left out, which means libpq's defaults (e.g. the UNIX socket for no host).
+**************************************************************************************************/
+static PGconn *
+sql_pg_connect(const char *host, const char *port, const char *database,
+	       const char *user, const char *password) {
+  char timeout[16];
+  const char *keys[] = { "host", "port", "dbname", "user", "password", "connect_timeout", NULL };
+  const char *values[7];
+
+  snprintf(timeout, sizeof(timeout), "%d", sql_timeout);
+  values[0] = host;
+  values[1] = port;
+  values[2] = database;
+  values[3] = user;
+  values[4] = password;
+  values[5] = sql_timeout > 0 ? timeout : NULL;
+  values[6] = NULL;
+  return PQconnectdbParams(keys, values, 0);
+}
+
+
+/**************************************************************************************************
+	SQL_PG_EXEC
+	PQexec() with db-timeout: libpq has no read timeout, so send the query and wait for the
+	answer with poll(). Returns the last result like PQexec(), or NULL. After a timeout the
+	connection still has a query in flight and can't be used again: it's marked broken and
+	replaced on the next attempt.
+**************************************************************************************************/
+static PGresult *
+sql_pg_exec(PGconn *conn, const char *query) {
+  PGresult *res = NULL, *last = NULL;
+  long long deadline;
+
+  if (sql_pg_broken)
+    return (NULL);
+  sql_pg_timed_out = 0;
+  if (sql_timeout <= 0)
+    return (PQexec(conn, query));
+
+  deadline = sql_now_ms() + (long long)sql_timeout * 1000;
+  if (!PQsendQuery(conn, query))
+    return (NULL);
+  for (;;) {
+    while (PQisBusy(conn)) {
+      struct pollfd pfd;
+      long long left = deadline - sql_now_ms();
+      int rv = 1;
+
+      pfd.fd = PQsocket(conn);
+      pfd.events = POLLIN;
+      pfd.revents = 0;
+      if (left <= 0 || pfd.fd < 0
+	  || ((rv = poll(&pfd, 1, (int)left)) < 0 && errno != EINTR) || rv == 0
+	  || !PQconsumeInput(conn)) {
+	sql_pg_timed_out = (left <= 0 || rv == 0);
+	sql_pg_broken = 1;
+	if (last)
+	  PQclear(last);
+	return (NULL);
+      }
+    }
+    if (!(res = PQgetResult(conn)))
+      break;
+    if (last)
+      PQclear(last);
+    last = res;
+  }
+  return (last);
+}
+
+/* After a failed query: was it the connection, rather than the SQL? */
+static int
+sql_pg_connection_error(PGconn *conn) {
+  return (sql_pg_broken || !conn || PQstatus(conn) == CONNECTION_BAD);
+}
+
+static void
+sql_pg_failed(PGconn *conn, PGresult *result) {
+  if (sql_pg_connection_error(conn)) {
+    char *msg = STRDUP(sql_pg_timed_out ? _("no answer within db-timeout") : PQerrorMessage(conn));
+
+    sql_one_line(msg);
+    sql_mark_down(msg);
+    RELEASE(msg);
+  } else {
+    sql_mark_up();
+    WarnSQL(conn, "%s", _("error during query"));	/* WarnSQL adds the server's message */
+  }
+}
+#else
+/**************************************************************************************************
+	SQL_MYSQL_OPTIONS
+	Options for every connection: the [client] group of my.cnf, automatic reconnects, and
+	db-timeout for connecting (the handshake included), reading and writing.
+**************************************************************************************************/
+static void
+sql_mysql_options(MYSQL *conn) {
+  unsigned int timeout = sql_timeout > 0 ? (unsigned int)sql_timeout : 0;
+  char reconnect = 1;					/* my_bool / bool, one byte either way */
+
+#if MYSQL_VERSION_ID > 32349
+  mysql_options(conn, MYSQL_READ_DEFAULT_GROUP, "client");
+#endif
+#if MYSQL_VERSION_ID > 50012
+  mysql_options(conn, MYSQL_OPT_RECONNECT, &reconnect);
+#endif
+  if (timeout) {
+    mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
+#if MYSQL_VERSION_ID > 40100
+    mysql_options(conn, MYSQL_OPT_READ_TIMEOUT, &timeout);
+    mysql_options(conn, MYSQL_OPT_WRITE_TIMEOUT, &timeout);
+#endif
+  }
+}
+
+/* After a failed call: was it the connection, rather than the SQL? */
+static int
+sql_mysql_connection_error(MYSQL *conn) {
+  switch (mysql_errno(conn)) {
+  case 2002:						/* CR_CONNECTION_ERROR */
+  case 2003:						/* CR_CONN_HOST_ERROR */
+  case 2005:						/* CR_UNKNOWN_HOST */
+  case 2006:						/* CR_SERVER_GONE_ERROR */
+  case 2013:						/* CR_SERVER_LOST (timeouts too) */
+  case 2055:						/* CR_SERVER_LOST_EXTENDED */
+  case 1927:						/* ER_CONNECTION_KILLED (MariaDB) */
+    return (1);
+  }
+  return (0);
+}
+
+static void
+sql_mysql_failed(MYSQL *conn) {
+  if (sql_mysql_connection_error(conn)) {
+    sql_mark_down(mysql_error(conn));
+  } else {
+    sql_mark_up();
+    if (mysql_error(conn)[0] != '\0')
+      WarnSQL(conn, _("%s: error during query"), mysql_error(conn));
+  }
+}
+#endif
+
+
+/**************************************************************************************************
+	SQL_SPLIT_HOST
+	Splits "host" or "host:port" into a copy of the host name and the port, as a number for
+	MySQL (0 = the default) and as a string for libpq (NULL = the default). `host' itself is
+	never modified: it's the saved copy that every reconnect uses. Free *name and *portstr
+	with sql_free_host().
+**************************************************************************************************/
+static void
+sql_split_host(const char *host, char **name, unsigned int *port, char **portstr) {
+  const char *colon = host ? strchr(host, ':') : NULL;
+
+  *name = NULL;
+  *port = 0;
+  *portstr = NULL;
+  if (!host)
+    return;
+  if (colon) {
+    *name = STRNDUP(host, colon - host);
+    *portstr = STRDUP(colon + 1);
+    *port = atoi(colon + 1);
+  } else {
+    *name = STRDUP(host);
+  }
+}
+
+static void
+sql_free_host(char **name, char **portstr) {
+  if (*name) RELEASE(*name);
+  if (*portstr) RELEASE(*portstr);
+}
+/*--- sql_split_host() --------------------------------------------------------------------------*/
+
+
+/**************************************************************************************************
+	SQL_CONNECT
+	Connect to the database. Returns 0, or -1 with a message in *error (free it with RELEASE),
+	leaving `sql' NULL. The server retries this at startup (db-connect-wait); sql_open() is
+	the fatal version the utilities use.
+**************************************************************************************************/
+int
+sql_connect(const char *user, const char *password, const char *host, const char *database,
+	    char **error) {
+  char *hostname = NULL, *portstr = NULL;
   unsigned int port = 0;
-  char *host2 = NULL;
+
+  *error = NULL;
 
   /* Save connection information so that we can reconnect if necessary */
   if (_sql_user) RELEASE(_sql_user);
@@ -49,58 +308,73 @@ sql_open(const char *user, const char *password, const char *host, const char *d
   _sql_host = host ? STRDUP(host) : NULL;
   _sql_database = database ? STRDUP(database) : NULL;
 
-  if( host != NULL ) {
-    host2 = STRDUP( host );
-
-    if ((portp = strchr(host2, ':')) != NULL) {
-      port = atoi(portp + 1);
-      *portp = '\0';
-      portp = portp + 1;
-    }
-  }
+  sql_split_host(host, &hostname, &port, &portstr);
 
 #if USE_PGSQL
-  char *portp2;
-//char *host2 = NULL;
-
-  sql = PQsetdbLogin(host2 ? host2 : host, portp, NULL, NULL, database, user, password);
+  sql = sql_pg_connect(hostname, portstr, database, user, password);
   if (PQstatus(sql) == CONNECTION_BAD) {
-    char *errmsg = PQerrorMessage(sql), *c, *out = NULL;
+    char *errmsg = PQerrorMessage(sql);
 
     /* Save the first error message so that the user gets the error message they "expect" */
-    for (c = errmsg; *c; c++)
-      if (*c == '\r' || *c == '\n')
-	*c = ' ';
-    strtrim(errmsg);
+    sql_one_line(errmsg);
 
-    ASPRINTF(&out, "%s %s: %s (errno=%d)",
-	     _("Error connecting to PostgreSQL server at"), host, errmsg, errno);
+    ASPRINTF(error, "%s %s: %s", _("Error connecting to PostgreSQL server at"), host, errmsg);
 
-    if (sql)
-      PQfinish(sql);
+    PQfinish(sql);
     /* Try login via UNIX socket before failing, per Lee Brotherston <lee@nerds.org.uk> */
-    sql = PQsetdbLogin(NULL, NULL, NULL, NULL, database, user, password);
-    if (PQstatus(sql) == CONNECTION_BAD)
-      Errx("%s", out);
-    RELEASE(out);
+    sql = sql_pg_connect(NULL, NULL, database, user, password);
+    if (PQstatus(sql) == CONNECTION_BAD) {
+      PQfinish(sql);
+      sql = NULL;
+      sql_free_host(&hostname, &portstr);
+      return (-1);
+    }
+    RELEASE(*error);
+    *error = NULL;
   }
 #else
   sql = ALLOCATE(sizeof(*sql), MYSQL);
   if (!mysql_init(sql)) {
-    Err(_("Unable to allocate MySQL data structure"));
+    RELEASE(sql);
+    sql = NULL;
+    *error = STRDUP(_("Unable to allocate MySQL data structure"));
+    sql_free_host(&hostname, &portstr);
+    return (-1);
   }
-#if MYSQL_VERSION_ID > 32349
-  mysql_options(sql, MYSQL_READ_DEFAULT_GROUP, "client");
-#endif
-#if MYSQL_VERSION_ID > 50012
-  mysql_options(sql, MYSQL_OPT_RECONNECT, "1");
-#endif
-  if (!(mysql_real_connect(sql, host2 ? host2 : host, user, password, database, port, NULL, 0)))
-    ErrSQL(sql, _("Error connecting to MySQL server at %s"), host);
+  sql_mysql_options(sql);
+  if (!(mysql_real_connect(sql, hostname, user, password, database, port, NULL, 0))) {
+    ASPRINTF(error, "%s %s: %s (errno=%u)", _("Error connecting to MySQL server at"), host,
+	     mysql_error(sql), mysql_errno(sql));
+    mysql_close(sql);
+    RELEASE(sql);
+    sql = NULL;
+    sql_free_host(&hostname, &portstr);
+    return (-1);
+  }
 #endif
 
-  if( host2 )
-    RELEASE( host2 );
+  sql_free_host(&hostname, &portstr);
+
+  /* A new connection (e.g. in a process forked while the old one was down) starts clean. */
+  sql_down_since = sql_retry_at = 0;
+#if USE_PGSQL
+  sql_pg_broken = sql_pg_timed_out = 0;
+#endif
+  return (0);
+}
+/*--- sql_connect() -----------------------------------------------------------------------------*/
+
+
+/**************************************************************************************************
+	SQL_OPEN
+	Connect to the database.  Errors fatal.
+**************************************************************************************************/
+void
+sql_open(const char *user, const char *password, const char *host, const char *database) {
+  char *error = NULL;
+
+  if (sql_connect(user, password, host, database, &error))
+    Errx("%s", error);
 }
 /*--- sql_open() --------------------------------------------------------------------------------*/
 
@@ -112,51 +386,64 @@ sql_open(const char *user, const char *password, const char *host, const char *d
 void
 sql_reopen(void) {
   SQL *new_sql = NULL;
-  char *portp = NULL;
+  char *hostname = NULL, *portstr = NULL;
   unsigned int port = 0;
 
-  if (_sql_host && (portp = strchr(_sql_host, ':'))) {
-    port = atoi(portp + 1);
-    *portp = '\0';
-  }
+  if (sql_unavailable())				/* Lost it just now: don't wait for it again */
+    return;
 
 #if USE_PGSQL
-  new_sql = PQsetdbLogin(_sql_host, portp, NULL, NULL, _sql_database, _sql_user, _sql_password);
+  if (sql && !sql_pg_connection_error(sql))
+    return;
+#else
+  if (!mysql_ping(sql)) {
+    sql_mark_up();
+    return;
+  }
+#endif
+
+  sql_split_host(_sql_host, &hostname, &port, &portstr);
+
+#if USE_PGSQL
+  new_sql = sql_pg_connect(hostname, portstr, _sql_database, _sql_user, _sql_password);
   if (PQstatus(new_sql) == CONNECTION_BAD) {
-    if (new_sql)
-      PQfinish(new_sql);
+    char *why = STRDUP(PQerrorMessage(new_sql));
+
+    sql_one_line(why);
+    PQfinish(new_sql);
     /* Try login via UNIX socket before failing, per Lee Brotherston <lee@nerds.org.uk> */
-    new_sql = PQsetdbLogin(NULL, NULL, NULL, NULL, _sql_database, _sql_user, _sql_password);
+    new_sql = sql_pg_connect(NULL, NULL, _sql_database, _sql_user, _sql_password);
     if (PQstatus(new_sql) == CONNECTION_BAD) {
-      if (new_sql)
-	PQfinish(new_sql);
+      PQfinish(new_sql);
+      sql_mark_down(why);
+      RELEASE(why);
+      sql_free_host(&hostname, &portstr);
       return;
     }
+    RELEASE(why);
   }
+  sql_pg_broken = 0;
 #else
-  if (!mysql_ping(sql)) return;
   new_sql = ALLOCATE(sizeof(*new_sql), MYSQL);
   if (!mysql_init(new_sql)) {
     RELEASE(new_sql);
+    sql_free_host(&hostname, &portstr);
     return;
   }
-#if MYSQL_VERSION_ID > 32349
-  mysql_options(new_sql, MYSQL_READ_DEFAULT_GROUP, "client");
-#endif
-#if MYSQL_VERSION_ID > 50012
-  mysql_options(new_sql, MYSQL_OPT_RECONNECT, "1");
-#endif
-  if (!(mysql_real_connect(new_sql, _sql_host, _sql_user, _sql_password, _sql_database, port, NULL, 0))) {
+  sql_mysql_options(new_sql);
+  if (!(mysql_real_connect(new_sql, hostname, _sql_user, _sql_password, _sql_database, port, NULL, 0))) {
+    sql_mark_down(mysql_error(new_sql));
     mysql_close(new_sql);
+    RELEASE(new_sql);
+    sql_free_host(&hostname, &portstr);
     return;
   }
 #endif
 
+  sql_free_host(&hostname, &portstr);
   sql_close(sql);
   sql = new_sql;
-
-  if (portp)
-    *portp = ':';
+  sql_mark_up();
 }
 /*--- sql_reopen() ------------------------------------------------------------------------------*/
 
@@ -272,35 +559,58 @@ _sql_close(SQL *sqlConn) {
 
 
 /**************************************************************************************************
+	SQL_READY
+	Called before every query. Returns 0 if the query should fail at once (see
+	sql_unavailable()). A PostgreSQL connection that broke is replaced first, since libpq
+	doesn't reconnect by itself (MySQL's does, MYSQL_OPT_RECONNECT).
+**************************************************************************************************/
+static int
+sql_ready(SQL **sqlConn) {
+  if (sql_unavailable())
+    return (0);
+#if USE_PGSQL
+  if (*sqlConn == sql && sql_pg_connection_error(sql)) {
+    sql_reopen();
+    if (sql_pg_connection_error(sql))
+      return (0);
+    *sqlConn = sql;
+  }
+#endif
+  return (1);
+}
+/*--- sql_ready() -------------------------------------------------------------------------------*/
+
+
+/**************************************************************************************************
 	SQL_NRQUERY
 	Issues an SQL query that does not return a result.  Returns 0 on success, -1 on error.
 **************************************************************************************************/
 int
 sql_nrquery(SQL *sqlConn, const char *query, size_t querylen) {
+  if (!sql_ready(&sqlConn))
+    return (-1);
+
 #if USE_PGSQL
-  ExecStatusType q_rv = PGRES_COMMAND_OK;
-  PGresult *result = NULL;
+  {
+    PGresult *result = sql_pg_exec(sqlConn, query);
 
-  result = PQexec(sqlConn, query);
-  q_rv = PQresultStatus(result);
-
-  if (q_rv == PGRES_COMMAND_OK) {
-    PQclear(result);
-    return (0);
-  } else {
-    /* WarnSQL(sqlConn, _("%s: error during query"), PQresStatus(PQresultStatus(result))); */
+    if (PQresultStatus(result) == PGRES_COMMAND_OK) {
+      PQclear(result);
+      sql_mark_up();
+      return (0);
+    }
+    sql_pg_failed(sqlConn, result);
     PQclear(result);
     return (-1);
   }
 #else
   if (mysql_real_query(sqlConn, query, querylen)) {
-    if (mysql_error(sql)[0] != '\0')
-      WarnSQL(sql, _("%s: error during query"), mysql_error(sql));
+    sql_mysql_failed(sqlConn);
     return (-1);
   }
-#endif
-
+  sql_mark_up();
   return (0);
+#endif
 }
 /*--- sql_nrquery() -----------------------------------------------------------------------------*/
 
@@ -313,36 +623,40 @@ SQL_RES *
 sql_query(SQL *sqlConn, const char *query, size_t querylen) {
   SQL_RES *res = NULL;
 
+  if (!sql_ready(&sqlConn))
+    return (NULL);
+
 #if USE_PGSQL
-  ExecStatusType q_rv = PGRES_COMMAND_OK;
-  PGresult *result = NULL;
+  {
+    PGresult *result = sql_pg_exec(sqlConn, query);
+    ExecStatusType q_rv = PQresultStatus(result);
 
-  result = PQexec(sqlConn, query);
-  q_rv = PQresultStatus(result);
-
-  if (q_rv == PGRES_TUPLES_OK) {
-    res = ALLOCATE(sizeof(SQL_RES), SQL_RES);
-    res->result = result;
-    res->tuples = PQntuples(result);
-    res->fields = PQnfields(result);
-    res->current_tuple = 0;
-    res->current_row = ALLOCATE(res->fields * sizeof(unsigned char *), unsigned char[]);
-    res->current_length = ALLOCATE(res->fields * sizeof(int *), int[]);
-  } else if (q_rv == PGRES_COMMAND_OK) {
-    PQclear(result);
-    return (NULL);
-  } else {
-    /* WarnSQL(sqlConn, _("%s: error during query"), PQresStatus(PQresultStatus(result))); */
-    PQclear(result);
-    return (NULL);
+    if (q_rv == PGRES_TUPLES_OK) {
+      res = ALLOCATE(sizeof(SQL_RES), SQL_RES);
+      res->result = result;
+      res->tuples = PQntuples(result);
+      res->fields = PQnfields(result);
+      res->current_tuple = 0;
+      res->current_row = ALLOCATE(res->fields * sizeof(unsigned char *), unsigned char[]);
+      res->current_length = ALLOCATE(res->fields * sizeof(int *), int[]);
+      sql_mark_up();
+    } else if (q_rv == PGRES_COMMAND_OK) {
+      PQclear(result);
+      sql_mark_up();
+      return (NULL);
+    } else {
+      sql_pg_failed(sqlConn, result);
+      PQclear(result);
+      return (NULL);
+    }
   }
 #else
   if (mysql_real_query(sqlConn, query, querylen)
       || !(res = mysql_store_result(sqlConn))) {
-    if (mysql_error(sql)[0] != '\0')
-      WarnSQL(sql, _("%s: error during query"), mysql_error(sql));
+    sql_mysql_failed(sqlConn);
     return (NULL);
   }
+  sql_mark_up();
 #endif
 
   return (res);

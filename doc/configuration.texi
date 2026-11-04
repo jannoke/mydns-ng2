@@ -38,6 +38,9 @@ Boolean values can be @samp{yes}, @samp{no}, @samp{1}, @samp{0}, @samp{on}, or @
 @cindex db-user
 @cindex db-password
 @cindex database
+@cindex db-timeout
+@cindex db-retry-interval
+@cindex db-connect-wait
 
 @table @var
 @item db-host
@@ -54,6 +57,28 @@ overridden by the @option{-p} (@option{--password}) command-line option.
 
 @item database
 @i{(string)}  The name of the database containing DNS data.
+
+@item db-timeout
+@i{(number)}  Seconds to wait for the database server to accept a connection or answer a
+query (default 3).  A query that takes longer fails, and so does the lookup that needed it
+(@code{SERVFAIL}).  @samp{0} waits as long as the operating system does, which can be minutes
+when the server hangs.  It must be longer than the slowest query, such as IXFR garbage
+collection on a large table.  With Oracle's MySQL client library a read can take three times
+this long, since it retries twice; MariaDB's and PostgreSQL's don't.
+
+@item db-retry-interval
+@i{(number)}  After the connection to the database fails (refused, lost, or no answer within
+@code{db-timeout}), queries fail at once for this many seconds instead of each waiting for the
+timeout again; then the next query tries the database again (default 10).  Cached answers are
+still served meanwhile.  Each server process handles one query at a time, so without this a
+hanging database would hold up every lookup.
+
+@item db-connect-wait
+@i{(number)}  How long to keep trying when the database can't be reached at startup, or when a
+server process that was restarted, or one that serves a zone transfer, connects (default 0).
+It retries after 1, 2, 4 and up to 30 seconds, logging each failure, and answers no queries
+meanwhile.  @samp{0} keeps trying until the database is there; @samp{-1} exits at once, as
+older versions did.  The utilities always exit at once.
 @end table
 
 

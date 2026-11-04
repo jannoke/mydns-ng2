@@ -179,6 +179,7 @@ extern SERVER		*find_server_for_task(TASK*);
 extern void		kill_server(SERVER *, int);
 extern void		server_status(void);
 extern void		named_cleanup(int);
+extern int		named_shutting_down(void);
 
 /* message.c */
 extern char		*dns_make_message(TASK *, uint16_t, uint8_t, dns_qtype_t,
