@@ -232,7 +232,7 @@ have been marked deleted and will remove them from the DB.
 .IP "\fBixfr-gc-interval\fP = \fIseconds\fP (`\fI86400\fP')"
 Number of seconds between each GC scan. - default 86400 seconds = 1 day.
 
-.IP "\fBixfr-gc-delay\fP" = \fIseconds\fP (`\fI600\fP')"
+.IP "\fBixfr-gc-delay\fP = \fIseconds\fP (`\fI600\fP')"
 Number of seconds before first GC scan. - default 600 seconds = 10 minutes.
 
 .IP "\fBextended-data-support\fP = \fIboolean\fP (`\fIno\fP')"
