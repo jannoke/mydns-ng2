@@ -44,7 +44,7 @@ db_connect(void)
   if (!password) password = conf_get(&Conf, "mysql-pass", NULL);
 
   sql_open(user, password, host, database);
-  Verbose(_("connected to %s, database \"%s\""), host, database);
+  Verbose(_("connected to %s, database \"%s\""), sql_host_in_use(), database);
 }
 /*--- db_connect() ------------------------------------------------------------------------------*/
 

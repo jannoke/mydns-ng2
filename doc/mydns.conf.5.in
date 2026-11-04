@@ -53,8 +53,22 @@ for details.
 The following configuration variables tell MyDNS about your database
 server.
 
-.IP "\fBdb-host\fP = \fIhostname\fP (`\fIlocalhost\fP')"
-Connect to the database server located at \fIhostname\fP.
+.IP "\fBdb-host\fP = \fIhostname\fP[\fB:\fP\fIport\fP][\fB,\fP ...] (`\fIlocalhost\fP')"
+Connect to the database server located at \fIhostname\fP, on \fIport\fP
+if one is given.
+Several servers can be listed, separated by commas, such as
+\fBdb1.example.com, db2.example.com:3307\fP.
+They must all hold the same data (replicas, or a cluster).
+MyDNS connects to the first one that answers, in the order listed.
+When the connection to the server in use fails (refused, lost, or no answer
+within \fBdb-timeout\fP, but not when a query has an SQL error), the next
+query goes to the next server that answers, wrapping around to the first.
+MyDNS stays with that server until it fails in turn; it does not go back to
+the first one when that one recovers. A restarted server process starts again
+from the first one.
+Only when none of them answers do queries fail for \fBdb-retry-interval\fP.
+Each server that hangs costs up to \fBdb-timeout\fP, so with all of them
+hanging one lookup can take that long times the number of servers.
 
 .IP "\fBdb-user\fP = \fIusername\fP"
 Use \fIusername\fP when authenticating with the database server.

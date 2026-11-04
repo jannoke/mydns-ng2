@@ -28,6 +28,11 @@ static char *_sql_password = NULL;
 static char *_sql_host = NULL;
 static char *_sql_database = NULL;
 
+/* db-host may list several servers ("db1, db2:3307"): the one in use, see sql_connect_any() */
+static int _sql_host_cur = 0;				/* Its index in the list */
+static char *_sql_host_used = NULL;			/* Its "host[:port]" */
+static int sql_need_failover = 0;			/* It failed: try the next one before querying */
+
 /* db-timeout and db-retry-interval, set by load_config() */
 int sql_timeout = 3;					/* Connect/read/write timeout, seconds (0 = none) */
 int sql_retry_interval = 10;				/* Seconds to fail at once after losing the server */
@@ -89,6 +94,73 @@ sql_mark_up(void) {
   }
 }
 /*--- sql_unavailable() -------------------------------------------------------------------------*/
+
+
+/**************************************************************************************************
+	SQL_HOST_NTH
+	db-host is a comma-separated list of "host" or "host:port". Returns a copy of entry `n'
+	(counting from 0, blank entries skipped, whitespace trimmed), or NULL if there is none.
+	Free it with RELEASE. The list itself is never modified.
+**************************************************************************************************/
+static char *
+sql_host_nth(const char *list, int n) {
+  const char *p = list, *comma;
+  int i = 0;
+
+  if (!list)
+    return (NULL);
+  for (;;) {
+    char *entry;
+
+    comma = strchr(p, ',');
+    entry = comma ? STRNDUP(p, comma - p) : STRDUP(p);
+    strtrim(entry);
+    if (*entry && i++ == n)
+      return (entry);
+    RELEASE(entry);
+    if (!comma)
+      return (NULL);
+    p = comma + 1;
+  }
+}
+
+/* The number of servers in db-host; 0 if there is none (connect to the default). */
+static int
+sql_host_count(const char *list) {
+  char *h;
+  int n = 0;
+
+  while ((h = sql_host_nth(list, n))) {
+    RELEASE(h);
+    n++;
+  }
+  return (n);
+}
+
+/* The server the connection goes to, for messages. */
+const char *
+sql_host_in_use(void) {
+  return (_sql_host_used ? _sql_host_used : _sql_host);
+}
+
+
+/**************************************************************************************************
+	SQL_CONNECTION_LOST
+	A query failed because the connection did. With one server, queries fail at once for a
+	while (sql_mark_down()). With several, the next query tries the other servers first
+	(sql_ready() -> sql_reopen()), and only if none answers does that happen.
+**************************************************************************************************/
+static void
+sql_connection_lost(const char *why) {
+  if (sql_host_count(_sql_host) > 1) {
+    if (!sql_need_failover)
+      Warnx(_("database server %s failed (%s); trying the others"), sql_host_in_use(), why);
+    sql_need_failover = 1;
+  } else {
+    sql_mark_down(why);
+  }
+}
+/*--- sql_connection_lost() ---------------------------------------------------------------------*/
 
 
 #if USE_PGSQL
@@ -189,7 +261,7 @@ sql_pg_failed(PGconn *conn, PGresult *result) {
     char *msg = STRDUP(sql_pg_timed_out ? _("no answer within db-timeout") : PQerrorMessage(conn));
 
     sql_one_line(msg);
-    sql_mark_down(msg);
+    sql_connection_lost(msg);
     RELEASE(msg);
   } else {
     sql_mark_up();
@@ -241,7 +313,7 @@ sql_mysql_connection_error(MYSQL *conn) {
 static void
 sql_mysql_failed(MYSQL *conn) {
   if (sql_mysql_connection_error(conn)) {
-    sql_mark_down(mysql_error(conn));
+    sql_connection_lost(mysql_error(conn));
   } else {
     sql_mark_up();
     if (mysql_error(conn)[0] != '\0')
@@ -285,17 +357,120 @@ sql_free_host(char **name, char **portstr) {
 
 
 /**************************************************************************************************
+	SQL_TRY_HOST
+	Connect to one server ("host" or "host:port"; NULL = the default) with the saved user,
+	password and database. Returns the connection, or NULL with the reason in *why (free it
+	with RELEASE).
+**************************************************************************************************/
+static SQL *
+sql_try_host(const char *host, char **why) {
+  char *hostname = NULL, *portstr = NULL;
+  unsigned int port = 0;
+  SQL *conn;
+
+  *why = NULL;
+  sql_split_host(host, &hostname, &port, &portstr);
+#if USE_PGSQL
+  conn = sql_pg_connect(hostname, portstr, _sql_database, _sql_user, _sql_password);
+  if (PQstatus(conn) == CONNECTION_BAD) {
+    *why = STRDUP(PQerrorMessage(conn));
+    sql_one_line(*why);
+    PQfinish(conn);
+    conn = NULL;
+  }
+#else
+  conn = ALLOCATE(sizeof(*conn), MYSQL);
+  if (!mysql_init(conn)) {
+    RELEASE(conn);
+    conn = NULL;
+    *why = STRDUP(_("Unable to allocate MySQL data structure"));
+  } else {
+    sql_mysql_options(conn);
+    if (!(mysql_real_connect(conn, hostname, _sql_user, _sql_password, _sql_database, port, NULL, 0))) {
+      ASPRINTF(why, "%s (errno=%u)", mysql_error(conn), mysql_errno(conn));
+      mysql_close(conn);
+      RELEASE(conn);
+      conn = NULL;
+    }
+  }
+#endif
+  sql_free_host(&hostname, &portstr);
+  return (conn);
+}
+/*--- sql_try_host() ----------------------------------------------------------------------------*/
+
+
+/**************************************************************************************************
+	SQL_CONNECT_ANY
+	Connect to the first server in db-host that answers, starting with entry `start' and
+	wrapping around, so each is tried once. Remembers which one it was, and logs it when that
+	isn't `current' (the one used so far). Returns NULL with every server's reason in *error
+	(free it with RELEASE) if none answers.
+**************************************************************************************************/
+static SQL *
+sql_connect_any(int start, int current, char **error) {
+  int n = sql_host_count(_sql_host), tries = n ? n : 1, i;
+  SQL *conn = NULL;
+
+  *error = NULL;
+  for (i = 0; i < tries && !conn; i++) {
+    int idx = (start + i) % tries;
+    char *host = n ? sql_host_nth(_sql_host, idx) : NULL, *why = NULL;
+
+    if ((conn = sql_try_host(host, &why))) {
+      if (n > 1 && idx != current)
+	Notice(_("using database server %s"), host);
+      if (_sql_host_used) RELEASE(_sql_host_used);
+      _sql_host_used = host;
+      _sql_host_cur = idx;
+      host = NULL;
+    } else {
+      char *prev = *error;
+
+      if (prev) {
+	ASPRINTF(error, "%s; %s: %s", prev, host ? host : "", why);
+	RELEASE(prev);
+      } else {
+#if USE_PGSQL
+	ASPRINTF(error, "%s %s: %s", _("Error connecting to PostgreSQL server at"), host ? host : "", why);
+#else
+	ASPRINTF(error, "%s %s: %s", _("Error connecting to MySQL server at"), host ? host : "", why);
+#endif
+      }
+    }
+    if (host) RELEASE(host);
+    if (why) RELEASE(why);
+  }
+
+#if USE_PGSQL
+  /* Try login via UNIX socket before failing, per Lee Brotherston <lee@nerds.org.uk> */
+  if (!conn) {
+    char *why = NULL;
+
+    if ((conn = sql_try_host(NULL, &why))) {
+      if (_sql_host_used) RELEASE(_sql_host_used);
+      _sql_host_used = NULL;
+    }
+    if (why) RELEASE(why);
+  }
+#endif
+
+  if (conn && *error)
+    RELEASE(*error);
+  return (conn);
+}
+/*--- sql_connect_any() -------------------------------------------------------------------------*/
+
+
+/**************************************************************************************************
 	SQL_CONNECT
-	Connect to the database. Returns 0, or -1 with a message in *error (free it with RELEASE),
-	leaving `sql' NULL. The server retries this at startup (db-connect-wait); sql_open() is
-	the fatal version the utilities use.
+	Connect to the database: the first server in db-host that answers. Returns 0, or -1 with
+	a message in *error (free it with RELEASE), leaving `sql' NULL. The server retries this
+	at startup (db-connect-wait); sql_open() is the fatal version the utilities use.
 **************************************************************************************************/
 int
 sql_connect(const char *user, const char *password, const char *host, const char *database,
 	    char **error) {
-  char *hostname = NULL, *portstr = NULL;
-  unsigned int port = 0;
-
   *error = NULL;
 
   /* Save connection information so that we can reconnect if necessary */
@@ -303,60 +478,19 @@ sql_connect(const char *user, const char *password, const char *host, const char
   if (_sql_password) RELEASE(_sql_password);
   if (_sql_host) RELEASE(_sql_host);
   if (_sql_database) RELEASE(_sql_database);
+  if (_sql_host_used) RELEASE(_sql_host_used);
   _sql_user = user ? STRDUP(user) : NULL;
   _sql_password = password ? STRDUP(password) : NULL;
   _sql_host = host ? STRDUP(host) : NULL;
   _sql_database = database ? STRDUP(database) : NULL;
+  _sql_host_cur = 0;
 
-  sql_split_host(host, &hostname, &port, &portstr);
-
-#if USE_PGSQL
-  sql = sql_pg_connect(hostname, portstr, database, user, password);
-  if (PQstatus(sql) == CONNECTION_BAD) {
-    char *errmsg = PQerrorMessage(sql);
-
-    /* Save the first error message so that the user gets the error message they "expect" */
-    sql_one_line(errmsg);
-
-    ASPRINTF(error, "%s %s: %s", _("Error connecting to PostgreSQL server at"), host, errmsg);
-
-    PQfinish(sql);
-    /* Try login via UNIX socket before failing, per Lee Brotherston <lee@nerds.org.uk> */
-    sql = sql_pg_connect(NULL, NULL, database, user, password);
-    if (PQstatus(sql) == CONNECTION_BAD) {
-      PQfinish(sql);
-      sql = NULL;
-      sql_free_host(&hostname, &portstr);
-      return (-1);
-    }
-    RELEASE(*error);
-    *error = NULL;
-  }
-#else
-  sql = ALLOCATE(sizeof(*sql), MYSQL);
-  if (!mysql_init(sql)) {
-    RELEASE(sql);
-    sql = NULL;
-    *error = STRDUP(_("Unable to allocate MySQL data structure"));
-    sql_free_host(&hostname, &portstr);
+  if (!(sql = sql_connect_any(0, 0, error)))
     return (-1);
-  }
-  sql_mysql_options(sql);
-  if (!(mysql_real_connect(sql, hostname, user, password, database, port, NULL, 0))) {
-    ASPRINTF(error, "%s %s: %s (errno=%u)", _("Error connecting to MySQL server at"), host,
-	     mysql_error(sql), mysql_errno(sql));
-    mysql_close(sql);
-    RELEASE(sql);
-    sql = NULL;
-    sql_free_host(&hostname, &portstr);
-    return (-1);
-  }
-#endif
-
-  sql_free_host(&hostname, &portstr);
 
   /* A new connection (e.g. in a process forked while the old one was down) starts clean. */
   sql_down_since = sql_retry_at = 0;
+  sql_need_failover = 0;
 #if USE_PGSQL
   sql_pg_broken = sql_pg_timed_out = 0;
 #endif
@@ -381,66 +515,42 @@ sql_open(const char *user, const char *password, const char *host, const char *d
 
 /**************************************************************************************************
 	SQL_REOPEN
-	Attempt to close and reopen the database connection.
+	Attempt to close and reopen the database connection. It goes to the server in use, or,
+	after that one failed (sql_connection_lost()), to the next one in db-host that answers.
+	There is no going back to the first server while the one in use works.
 **************************************************************************************************/
 void
 sql_reopen(void) {
   SQL *new_sql = NULL;
-  char *hostname = NULL, *portstr = NULL;
-  unsigned int port = 0;
+  char *error = NULL;
+  int failover = sql_need_failover, n, start;
 
-  if (sql_unavailable())				/* Lost it just now: don't wait for it again */
-    return;
-
+  if (!failover) {
+    if (sql_unavailable())				/* Lost it just now: don't wait for it again */
+      return;
 #if USE_PGSQL
-  if (sql && !sql_pg_connection_error(sql))
-    return;
+    if (sql && !sql_pg_connection_error(sql))
+      return;
 #else
-  if (!mysql_ping(sql)) {
-    sql_mark_up();
-    return;
-  }
-#endif
-
-  sql_split_host(_sql_host, &hostname, &port, &portstr);
-
-#if USE_PGSQL
-  new_sql = sql_pg_connect(hostname, portstr, _sql_database, _sql_user, _sql_password);
-  if (PQstatus(new_sql) == CONNECTION_BAD) {
-    char *why = STRDUP(PQerrorMessage(new_sql));
-
-    sql_one_line(why);
-    PQfinish(new_sql);
-    /* Try login via UNIX socket before failing, per Lee Brotherston <lee@nerds.org.uk> */
-    new_sql = sql_pg_connect(NULL, NULL, _sql_database, _sql_user, _sql_password);
-    if (PQstatus(new_sql) == CONNECTION_BAD) {
-      PQfinish(new_sql);
-      sql_mark_down(why);
-      RELEASE(why);
-      sql_free_host(&hostname, &portstr);
+    if (sql && !mysql_ping(sql)) {			/* (a failed server isn't pinged: that waits again) */
+      sql_mark_up();
       return;
     }
-    RELEASE(why);
-  }
-  sql_pg_broken = 0;
-#else
-  new_sql = ALLOCATE(sizeof(*new_sql), MYSQL);
-  if (!mysql_init(new_sql)) {
-    RELEASE(new_sql);
-    sql_free_host(&hostname, &portstr);
-    return;
-  }
-  sql_mysql_options(new_sql);
-  if (!(mysql_real_connect(new_sql, hostname, _sql_user, _sql_password, _sql_database, port, NULL, 0))) {
-    sql_mark_down(mysql_error(new_sql));
-    mysql_close(new_sql);
-    RELEASE(new_sql);
-    sql_free_host(&hostname, &portstr);
-    return;
-  }
 #endif
+  }
+  sql_need_failover = 0;
 
-  sql_free_host(&hostname, &portstr);
+  n = sql_host_count(_sql_host);
+  start = (failover && n > 1) ? (_sql_host_cur + 1) % n : _sql_host_cur;
+  if (!(new_sql = sql_connect_any(start, _sql_host_cur, &error))) {
+    sql_mark_down(error);
+    RELEASE(error);
+    return;
+  }
+
+#if USE_PGSQL
+  sql_pg_broken = 0;
+#endif
   sql_close(sql);
   sql = new_sql;
   sql_mark_up();
@@ -566,6 +676,10 @@ _sql_close(SQL *sqlConn) {
 **************************************************************************************************/
 static int
 sql_ready(SQL **sqlConn) {
+  if (sql_need_failover && *sqlConn == sql) {		/* The server in use failed: try the others */
+    sql_reopen();
+    *sqlConn = sql;
+  }
   if (sql_unavailable())
     return (0);
 #if USE_PGSQL
