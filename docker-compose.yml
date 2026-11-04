@@ -1,0 +1,48 @@
+# MyDNS with MariaDB and a demo zone (example.test.). See QUICKSTART.docker.
+#   cp .env.example .env    # optional: passwords, port
+#   docker compose up -d
+#   dig @127.0.0.1 -p 5353 www.example.test
+
+services:
+  db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: mydns
+      MARIADB_USER: mydns
+      MARIADB_PASSWORD: ${MYDNS_DB_PASSWORD:-mydns}
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+    volumes:
+      - mydns_db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  mydns:
+    build: .
+    image: mydns:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      MYDNS_DB_HOST: db
+      MYDNS_DB_USER: mydns
+      MYDNS_DB_PASSWORD: ${MYDNS_DB_PASSWORD:-mydns}
+      MYDNS_DATABASE: mydns
+      MYDNS_INIT_SCHEMA: "1"
+      MYDNS_ALLOW_AXFR: ${MYDNS_ALLOW_AXFR:-no}
+      MYDNS_RECURSIVE: ${MYDNS_RECURSIVE:-}
+      MYDNS_HEALTH_NAME: example.test
+    volumes:
+      - ./docker/demo-zone.sql:/docker-entrypoint.d/10-demo.sql:ro
+      # Your own config instead of the generated one:
+      # - ./mydns.conf:/etc/mydns.conf:ro
+    ports:
+      - "${MYDNS_PORT:-5353}:53/udp"
+      - "${MYDNS_PORT:-5353}:53/tcp"
+    restart: unless-stopped
+
+volumes:
+  mydns_db:
