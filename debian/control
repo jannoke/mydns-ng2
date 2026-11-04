@@ -1,0 +1,32 @@
+Source: mydns
+Section: net
+Priority: optional
+Maintainer: Taavi Sannik <taavi@sannik.ee>
+Build-Depends: debhelper-compat (= 13),
+               autoconf,
+               automake,
+               libtool,
+               gettext,
+               autopoint,
+               texinfo,
+               pkgconf,
+               default-libmysqlclient-dev
+Standards-Version: 4.7.0
+Homepage: http://www.mydns-ng.com
+Rules-Requires-Root: no
+
+Package: mydns-mysql
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Recommends: default-mysql-client
+Suggests: default-mysql-server
+Provides: mydns
+Conflicts: mydns
+Replaces: mydns
+Description: DNS server serving records from a MySQL/MariaDB database
+ MyDNS is an authoritative DNS server that answers queries directly from
+ zone and resource record tables in an SQL database, so zones can be changed
+ without reloading the server. It supports AXFR/IXFR, NOTIFY, DNS UPDATE and
+ forwarding to a recursive resolver.
+ .
+ This package is built with the MySQL/MariaDB backend.

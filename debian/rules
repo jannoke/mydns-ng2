@@ -1,0 +1,28 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@ --with installsysusers
+
+# One binary supports one database backend, chosen at build time.
+# The upstream unit is Type=forking for Fedora; debian/ ships its own.
+override_dh_auto_configure:
+	dh_auto_configure -- --with-mysql --without-pgsql --with-systemdsystemunitdir=no
+
+# The tree has no test suite run by "make check"; tests/ needs a database.
+override_dh_auto_test:
+
+override_dh_auto_install:
+	dh_auto_install
+	install -D -m 0600 debian/mydns.conf debian/mydns-mysql/etc/mydns.conf
+	rm -f debian/mydns-mysql/usr/share/info/dir
+
+# Installed and enabled, but not started: /etc/mydns.conf needs database
+# credentials first (see README.Debian).
+override_dh_installsystemd:
+	dh_installsystemd --name=mydns --no-start
+
+override_dh_fixperms:
+	dh_fixperms
+	chmod 0600 debian/mydns-mysql/etc/mydns.conf

@@ -1,0 +1,5 @@
+mydns (1.2.8.32) trixie; urgency=medium
+
+  * Debian 13 packaging, MySQL/MariaDB backend (mydns-mysql).
+
+ -- Taavi Sannik <taavi@sannik.ee>  Wed, 04 Nov 2026 22:00:00 +0200
