@@ -691,9 +691,13 @@ AC_DEFUN([AC_HEADER_PQ],
 					PQ_INCLUDE="-I$dir"
 
 					AC_MSG_CHECKING([for PostgreSQL version number])
-					PG_VERSION=`grep "PG_VERSION " $dir/pg_config.h | cut -f3 -d' '`
+					dnl pg_config.h has e.g. #define PG_VERSION "17.11 (Debian 17.11-0+deb13u1)":
+					dnl take what is between the quotes. (Cutting at spaces left an unterminated
+					dnl string in config.h.) pg_config.h itself mustn't be included instead: it
+					dnl defines PACKAGE_NAME/PACKAGE_VERSION too.
+					PG_VERSION=`grep '^#define PG_VERSION ' $dir/pg_config.h | cut -d'"' -f2`
 					AC_MSG_RESULT([$PG_VERSION])
-					AC_DEFINE_UNQUOTED(PGSQL_VERSION, [$PG_VERSION], [PostgreSQL version])
+					AC_DEFINE_UNQUOTED(PGSQL_VERSION, ["$PG_VERSION"], [PostgreSQL version])
 
 					AC_CHECK_FILE($dir/pg_config.h, AC_DEFINE(HAVE_PGCONFIG, 1, [Does the system have pg_config.h?]))
 				fi
