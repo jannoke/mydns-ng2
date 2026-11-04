@@ -1,0 +1,6 @@
+mydns[7576]: mydns: mydns 1.2.8.32 started Wed Nov  4 18:48:44 2026 (listening on 1 address)
+mydns[7576]: mydns: /etc/mydns-fwd.conf: WARNING: config file is readable by unprivileged user
+mydns[7576]: mydns: terminated
+mydns[7576]: mydns: 4a080af6c373 up 3s (3s) 1 questions (0/s) NOERROR=0 SERVFAIL=0 NXDOMAIN=0 NOTIMP=0 REFUSED=0 
+mydns[7584]: mydns: terminated
+mydns[7584]: mydns: 4a080af6c373 up 3s (3s) 9 questions (3/s) NOERROR=2 SERVFAIL=0 NXDOMAIN=3 NOTIMP=0 REFUSED=0 (44% TCP, 4 queries)
