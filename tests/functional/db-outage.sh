@@ -1,5 +1,5 @@
 #!/bin/bash
-# Database outages while mydns runs: a server that hangs (SIGSTOP: connections are accepted,
+# Database outages while mydns runs, and a database that is not there when it starts: a server that hangs (SIGSTOP: connections are accepted,
 # nothing answers, like a network partition or `docker pause`) and one that is stopped.
 # The database listens on a non-default port, so reconnects must keep the port.
 #
@@ -15,6 +15,7 @@ DBTYPE=${DBTYPE:-mysql}
 WORK=${WORK:-/work}
 TIMEOUT=2 RETRY=4
 LOG=/t/db-outage-$DBTYPE.log
+export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=0}
 fail=0
 cd "$WORK" || exit 2
 
@@ -141,6 +142,48 @@ n_noise=$(grep -c 'error loading SOA\|error finding' "$LOG")
 [ "$n_noise" = 0 ] && echo "OUTAGE PASS log: no per-query errors" \
   || { echo "OUTAGE FAIL log: $n_noise per-query error lines"; fail=1; }
 grep -q 'runtime error\|ERROR: AddressSanitizer' "$LOG" && { echo "OUTAGE FAIL sanitizer report in $LOG"; fail=1; }
+
+# ok <description> <command...>: PASS if the command succeeds
+ok() { local d=$1; shift; if "$@"; then echo "OUTAGE PASS $d"; else echo "OUTAGE FAIL $d"; fail=1; fi; }
+# mydns processes that are alive (the dev container's init doesn't reap zombies): "pid ppid" lines
+alive() { ps -C mydns -o pid=,ppid=,stat= | awk '$3 !~ /Z/ { print $1, $2 }'; }
+running() { [ -n "$(alive)" ]; }
+master_pid() { alive | awk '$2 == 1 { print $1; exit }'; }
+child_of() { alive | awk -v m="$1" '$2 == m { print $1; exit }'; }
+gone_within() { local i; for i in $(seq $(( $1 * 4 ))); do running || return 0; sleep 0.25; done; return 1; }
+SLOG=/t/db-startup-$DBTYPE.log
+
+echo "-- database not there at startup"
+db_stop
+(setsid src/mydns/mydns -c /etc/mydns-outage.conf > "$SLOG" 2>&1 &)
+sleep 3
+ok "waits for the database instead of exiting" running
+ok "logs the retries" grep -q 'retrying in' "$SLOG"
+db_start
+for i in $(seq 60); do dig +short +time=1 +tries=1 @127.0.0.1 www.example.test A | grep -qx 192.0.2.10 && break; sleep 0.25; done
+expect "answers once the database is up" NOERROR 1 www.example.test
+ok "logs when it got connected" grep -q 'connected to the database after' "$SLOG"
+
+echo "-- server process restarted while the database is down"
+db_stop
+master=$(master_pid); child=$(child_of "$master")
+kill -9 "$child"; sleep 4
+n_died=$(grep -c 'Server pid .* died' "$SLOG")
+ok "the master restarted it once, no fork loop ($n_died restart(s))" test "$n_died" -le 1
+ok "the new server process waits for the database" test -n "$(child_of "$master")"
+kill -TERM "$master"
+ok "SIGTERM stops it while it waits" gone_within 5
+db_start
+
+echo "-- db-connect-wait gives up"
+db_stop
+sed -i '/^db-connect-wait/d' /etc/mydns-outage.conf; echo "db-connect-wait = 3" >> /etc/mydns-outage.conf
+t0=$(date +%s); src/mydns/mydns -c /etc/mydns-outage.conf >> "$SLOG" 2>&1; rc=$?; t1=$(date +%s)
+ok "exits with an error after about 3 s (rc=$rc, $((t1 - t0)) s)" test $rc -ne 0 -a $((t1 - t0)) -ge 2 -a $((t1 - t0)) -le 6
+ok "says why" grep -q 'gave up after' "$SLOG"
+sed -i '/^db-connect-wait/d' /etc/mydns-outage.conf
+db_start
+grep -q 'runtime error\|ERROR: AddressSanitizer' "$SLOG" && { echo "OUTAGE FAIL sanitizer report in $SLOG"; fail=1; }
 
 [ $fail = 0 ] && echo "== OUTAGE OK ($DBTYPE) ==" || { echo "== OUTAGE FAILURES ($DBTYPE) =="; sed 's/^/    log: /' "$LOG" | tail -15; }
 exit $fail

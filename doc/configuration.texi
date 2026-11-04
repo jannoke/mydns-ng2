@@ -40,6 +40,7 @@ Boolean values can be @samp{yes}, @samp{no}, @samp{1}, @samp{0}, @samp{on}, or @
 @cindex database
 @cindex db-timeout
 @cindex db-retry-interval
+@cindex db-connect-wait
 
 @table @var
 @item db-host
@@ -71,6 +72,13 @@ this long, since it retries twice; MariaDB's and PostgreSQL's don't.
 timeout again; then the next query tries the database again (default 10).  Cached answers are
 still served meanwhile.  Each server process handles one query at a time, so without this a
 hanging database would hold up every lookup.
+
+@item db-connect-wait
+@i{(number)}  How long to keep trying when the database can't be reached at startup, or when a
+server process that was restarted, or one that serves a zone transfer, connects (default 0).
+It retries after 1, 2, 4 and up to 30 seconds, logging each failure, and answers no queries
+meanwhile.  @samp{0} keeps trying until the database is there; @samp{-1} exits at once, as
+older versions did.  The utilities always exit at once.
 @end table
 
 

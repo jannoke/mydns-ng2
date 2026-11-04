@@ -121,6 +121,7 @@ static CONF defConfig[] = {
   {	"database",		V_(PACKAGE_NAME),			N_("MyDNS database name"),							NULL,		0,		NULL	},
   {	"db-timeout",		V_("3"),				N_("Seconds to wait for the database to connect or answer (0 = no limit)"),	NULL,		0,		NULL	},
   {	"db-retry-interval",	V_("10"),				N_("Seconds to fail queries at once after losing the database"),		NULL,		0,		NULL	},
+  {	"db-connect-wait",	V_("0"),				N_("Seconds to keep trying to connect at startup (0 = no limit, -1 = don't)"),	NULL,		0,		NULL	},
 
   {	"-",			NULL,					N_("GENERAL OPTIONS"),								NULL,		0,		NULL	},
 

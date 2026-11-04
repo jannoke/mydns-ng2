@@ -84,6 +84,14 @@ database again. Cached answers are still served meanwhile. Each server
 process handles one query at a time, so without this a hanging database
 would hold up every lookup.
 
+.IP "\fBdb-connect-wait\fP = \fIseconds\fP (`\fI0\fP')"
+How long to keep trying when the database can't be reached at startup, or
+when a server process that was restarted, or one that serves a zone
+transfer, connects. It retries after 1, 2, 4 and up to 30 seconds, logging
+each failure, and answers no queries meanwhile. \fB0\fP keeps trying until
+the database is there; \fB-1\fP exits at once, as older versions did. The
+utilities always exit at once.
+
 
 .\"--------------------------------------------------------------------------
 .\" GENERAL OPTIONS

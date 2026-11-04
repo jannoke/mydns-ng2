@@ -602,6 +602,8 @@ extern SQL		*sql;
 extern int		sql_timeout;			/* db-timeout */
 extern int		sql_retry_interval;		/* db-retry-interval */
 extern int		sql_unavailable(void);
+extern int		sql_connect(const char *user, const char *password, const char *host,
+				    const char *database, char **error);
 extern void		sql_open(const char *user, const char *password, const char *host, const char *database);
 extern void		sql_reopen(void);
 extern void		_sql_close(SQL *);

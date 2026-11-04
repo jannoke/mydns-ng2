@@ -23,3 +23,4 @@ void free_other_tasks(TASK *t, int need_socket) { die("free_other_tasks"); }
 void kill_server(SERVER *server, int sig) { die("kill_server"); }
 void named_cleanup(int signo) { die("named_cleanup"); }
 void named_shutdown(int signo) { die("named_shutdown"); }
+int named_shutting_down(void) { return 0; }

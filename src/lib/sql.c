@@ -92,6 +92,18 @@ sql_mark_up(void) {
 
 
 #if USE_PGSQL
+/* libpq's messages span lines and indent with tabs: make one log line of them. */
+static void
+sql_one_line(char *msg) {
+  char *c;
+
+  for (c = msg; *c; c++)
+    if (*c == '\r' || *c == '\n' || *c == '\t')
+      *c = ' ';
+  strtrim(msg);
+}
+
+
 /**************************************************************************************************
 	SQL_PG_CONNECT
 	PQsetdbLogin() takes no connect timeout, so connect with PQconnectdbParams(). NULL values
@@ -174,12 +186,9 @@ sql_pg_connection_error(PGconn *conn) {
 static void
 sql_pg_failed(PGconn *conn, PGresult *result) {
   if (sql_pg_connection_error(conn)) {
-    char *msg = STRDUP(sql_pg_timed_out ? _("no answer within db-timeout") : PQerrorMessage(conn)), *c;
+    char *msg = STRDUP(sql_pg_timed_out ? _("no answer within db-timeout") : PQerrorMessage(conn));
 
-    for (c = msg; *c; c++)
-      if (*c == '\r' || *c == '\n')
-	*c = ' ';
-    strtrim(msg);
+    sql_one_line(msg);
     sql_mark_down(msg);
     RELEASE(msg);
   } else {
@@ -276,13 +285,18 @@ sql_free_host(char **name, char **portstr) {
 
 
 /**************************************************************************************************
-	SQL_OPEN
-	Connect to the database.  Errors fatal.
+	SQL_CONNECT
+	Connect to the database. Returns 0, or -1 with a message in *error (free it with RELEASE),
+	leaving `sql' NULL. The server retries this at startup (db-connect-wait); sql_open() is
+	the fatal version the utilities use.
 **************************************************************************************************/
-void
-sql_open(const char *user, const char *password, const char *host, const char *database) {
+int
+sql_connect(const char *user, const char *password, const char *host, const char *database,
+	    char **error) {
   char *hostname = NULL, *portstr = NULL;
   unsigned int port = 0;
+
+  *error = NULL;
 
   /* Save connection information so that we can reconnect if necessary */
   if (_sql_user) RELEASE(_sql_user);
@@ -299,33 +313,44 @@ sql_open(const char *user, const char *password, const char *host, const char *d
 #if USE_PGSQL
   sql = sql_pg_connect(hostname, portstr, database, user, password);
   if (PQstatus(sql) == CONNECTION_BAD) {
-    char *errmsg = PQerrorMessage(sql), *c, *out = NULL;
+    char *errmsg = PQerrorMessage(sql);
 
     /* Save the first error message so that the user gets the error message they "expect" */
-    for (c = errmsg; *c; c++)
-      if (*c == '\r' || *c == '\n')
-	*c = ' ';
-    strtrim(errmsg);
+    sql_one_line(errmsg);
 
-    ASPRINTF(&out, "%s %s: %s (errno=%d)",
-	     _("Error connecting to PostgreSQL server at"), host, errmsg, errno);
+    ASPRINTF(error, "%s %s: %s", _("Error connecting to PostgreSQL server at"), host, errmsg);
 
-    if (sql)
-      PQfinish(sql);
+    PQfinish(sql);
     /* Try login via UNIX socket before failing, per Lee Brotherston <lee@nerds.org.uk> */
     sql = sql_pg_connect(NULL, NULL, database, user, password);
-    if (PQstatus(sql) == CONNECTION_BAD)
-      Errx("%s", out);
-    RELEASE(out);
+    if (PQstatus(sql) == CONNECTION_BAD) {
+      PQfinish(sql);
+      sql = NULL;
+      sql_free_host(&hostname, &portstr);
+      return (-1);
+    }
+    RELEASE(*error);
+    *error = NULL;
   }
 #else
   sql = ALLOCATE(sizeof(*sql), MYSQL);
   if (!mysql_init(sql)) {
-    Err(_("Unable to allocate MySQL data structure"));
+    RELEASE(sql);
+    sql = NULL;
+    *error = STRDUP(_("Unable to allocate MySQL data structure"));
+    sql_free_host(&hostname, &portstr);
+    return (-1);
   }
   sql_mysql_options(sql);
-  if (!(mysql_real_connect(sql, hostname, user, password, database, port, NULL, 0)))
-    ErrSQL(sql, _("Error connecting to MySQL server at %s"), host);
+  if (!(mysql_real_connect(sql, hostname, user, password, database, port, NULL, 0))) {
+    ASPRINTF(error, "%s %s: %s (errno=%u)", _("Error connecting to MySQL server at"), host,
+	     mysql_error(sql), mysql_errno(sql));
+    mysql_close(sql);
+    RELEASE(sql);
+    sql = NULL;
+    sql_free_host(&hostname, &portstr);
+    return (-1);
+  }
 #endif
 
   sql_free_host(&hostname, &portstr);
@@ -335,6 +360,21 @@ sql_open(const char *user, const char *password, const char *host, const char *d
 #if USE_PGSQL
   sql_pg_broken = sql_pg_timed_out = 0;
 #endif
+  return (0);
+}
+/*--- sql_connect() -----------------------------------------------------------------------------*/
+
+
+/**************************************************************************************************
+	SQL_OPEN
+	Connect to the database.  Errors fatal.
+**************************************************************************************************/
+void
+sql_open(const char *user, const char *password, const char *host, const char *database) {
+  char *error = NULL;
+
+  if (sql_connect(user, password, host, database, &error))
+    Errx("%s", error);
 }
 /*--- sql_open() --------------------------------------------------------------------------------*/
 
@@ -367,12 +407,9 @@ sql_reopen(void) {
 #if USE_PGSQL
   new_sql = sql_pg_connect(hostname, portstr, _sql_database, _sql_user, _sql_password);
   if (PQstatus(new_sql) == CONNECTION_BAD) {
-    char *why = STRDUP(PQerrorMessage(new_sql)), *c;
+    char *why = STRDUP(PQerrorMessage(new_sql));
 
-    for (c = why; *c; c++)
-      if (*c == '\r' || *c == '\n')
-	*c = ' ';
-    strtrim(why);
+    sql_one_line(why);
     PQfinish(new_sql);
     /* Try login via UNIX socket before failing, per Lee Brotherston <lee@nerds.org.uk> */
     new_sql = sql_pg_connect(NULL, NULL, _sql_database, _sql_user, _sql_password);
