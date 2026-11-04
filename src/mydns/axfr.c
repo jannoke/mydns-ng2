@@ -172,13 +172,16 @@ axfr_reply(TASK *t) {
 
 
 /**************************************************************************************************
-	CHECK_XFER
+	XFER_ALLOWED
 	If the "xfer" column exists in the soa table, it should contain a list of wildcards separated
-	by commas.  In order for this zone transfer to continue, one of the wildcards must match
-	the client's IP address.
+	by commas.  In order for a zone transfer (AXFR or IXFR) to continue, one of the wildcards must
+	match the client's IP address.
+	Returns 1 if the transfer is allowed, 0 if it is not, -1 on a database error.
+	Unlike the old check_xfer() this never exits, so it is safe to call from the main server
+	process (IXFR is answered there; only AXFR runs in a forked child).
 **************************************************************************************************/
-static void
-check_xfer(TASK *t, MYDNS_SOA *soa) {
+int
+xfer_allowed(TASK *t, MYDNS_SOA *soa) {
   SQL_RES	*res = NULL;
   SQL_ROW	row = NULL;
   char		ip[256];
@@ -189,26 +192,28 @@ check_xfer(TASK *t, MYDNS_SOA *soa) {
   memset(&ip, 0, sizeof(ip));
 
   if (!mydns_soa_use_xfer)
-    return;
+    return (1);
 
   strncpy(ip, clientaddr(t), sizeof(ip)-1);
 
+  /* This filters the soa table, so it must use the soa table's "active" column settings */
   querylen = sql_build_query(&query, "SELECT xfer FROM %s WHERE id=%u%s%s%s;",
 			     mydns_soa_table_name, soa->id,
-			     (mydns_rr_use_active)? " AND active='" : "",
-			     (mydns_rr_use_active)? mydns_rr_active_types[0] : "",
-			     (mydns_rr_use_active)? "'" : "");
+			     (mydns_soa_use_active)? " AND active='" : "",
+			     (mydns_soa_use_active)? mydns_soa_active_types[0] : "",
+			     (mydns_soa_use_active)? "'" : "");
 
   res = sql_query(sql, query, querylen);
   RELEASE(query);
   if (!res) {
-    ErrSQL(sql, "%s: %s", desctask(t), _("error loading zone transfer access rules"));
+    WarnSQL(sql, "%s: %s", desctask(t), _("error loading zone transfer access rules"));
+    return (-1);
   }
 
   if ((row = sql_getrow(res, NULL))) {
     char *wild = NULL, *r = NULL;
 
-    for (r = row[0]; !ok && (wild = strsep(&r, ",")); )	{
+    for (r = row[0]; r && !ok && (wild = strsep(&r, ",")); )	{
       if (strchr(wild, '/')) {
 	if (t->family == AF_INET)
 	  ok = in_cidr(wild, t->addr4.sin_addr);
@@ -218,7 +223,18 @@ check_xfer(TASK *t, MYDNS_SOA *soa) {
   }
   sql_free(res);
 
-  if (!ok) {
+  return (ok);
+}
+/*--- xfer_allowed() ----------------------------------------------------------------------------*/
+
+
+/**************************************************************************************************
+	CHECK_XFER
+	AXFR access check: refuses and ends the (forked) AXFR process unless xfer_allowed().
+**************************************************************************************************/
+static void
+check_xfer(TASK *t, MYDNS_SOA *soa) {
+  if (xfer_allowed(t, soa) != 1) {
     dnserror(t, DNS_RCODE_REFUSED, ERR_NO_AXFR);
     axfr_reply(t);
     axfr_error(t, _("access denied"));

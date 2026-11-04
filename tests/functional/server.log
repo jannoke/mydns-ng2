@@ -1,0 +1,15 @@
+mydns[7443]: mydns: mydns 1.2.8.32 started Wed Nov  4 18:48:40 2026 (listening on 1 address)
+mydns[7443]: mydns: /etc/mydns.conf: WARNING: config file is readable by unprivileged user
+mydns[7446]: mydns: read_tcp_length: no data for fd 6: 127.0.0.1: Client closed TCP connection
+mydns[7443]: mydns: terminated
+mydns[7446]: mydns: terminated
+mydns[7443]: mydns: 4a080af6c373 up 4s (4s) 1 questions (0/s) NOERROR=0 SERVFAIL=0 NXDOMAIN=0 NOTIMP=0 REFUSED=0 
+mydns[7446]: mydns: 4a080af6c373 up 4s (4s) 27 questions (7/s) NOERROR=23 SERVFAIL=0 NXDOMAIN=1 NOTIMP=0 REFUSED=0 (25% TCP, 7 queries)
+mydns[7578]: mydns: mydns 1.2.8.32 started Wed Nov  4 18:48:44 2026 (listening on 1 address)
+mydns[7578]: mydns: /etc/mydns.conf: WARNING: config file is readable by unprivileged user
+mydns[7585]: mydns: read_tcp_length: no data for fd 8: 127.0.0.1: Client closed TCP connection
+mydns[7578]: mydns: terminated
+mydns[7578]: mydns: 4a080af6c373 up 3s (3s) 1 questions (0/s) NOERROR=0 SERVFAIL=0 NXDOMAIN=0 NOTIMP=0 REFUSED=0 
+mydns[7585]: last message repeated 2 times
+mydns[7585]: mydns: terminated
+mydns[7585]: mydns: 4a080af6c373 up 3s (3s) 14 questions (5/s) NOERROR=6 SERVFAIL=0 NXDOMAIN=3 NOTIMP=0 REFUSED=0 (42% TCP, 6 queries)

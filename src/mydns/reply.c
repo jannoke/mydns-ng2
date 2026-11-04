@@ -534,28 +534,60 @@ reply_add_srv(TASK *t, RR *r) {
 	Adds a TXT record to the reply.
 	Returns the numeric offset of the start of this record within the reply, or -1 on error.
 **************************************************************************************************/
+/*
+** TXT data is stored as one or more strings separated by NUL octets. On the wire each
+** <character-string> is a single length octet (0..255) plus that many bytes (RFC 1035 3.3.14),
+** so every stored string becomes one or more <=255-octet chunks; a stored string longer than
+** 255 octets (e.g. a DKIM key entered as one value) is split rather than rejected. The old
+** code wrote the whole value - separators included - as one string with a truncated length
+** octet, producing a malformed answer for anything over 255 octets or with several strings.
+*/
+static size_t
+reply_txt_rdlength(const char *data, size_t len) {
+  size_t	rdlen = 0, off = 0, elen = 0;
+
+  do {
+    elen = (off < len) ? strnlen(&data[off], len - off) : 0;
+    rdlen += elen + ((elen + 254) / 255 ? (elen + 254) / 255 : 1);
+    off += elen + 1;
+  } while (off < len);
+  return (rdlen);
+}
+
 static inline int
 reply_add_txt(TASK *t, RR *r) {
   char		*dest = NULL;
-  size_t	size = 0;
-  size_t	len = 0;
   MYDNS_RR	*rr = (MYDNS_RR *)r->rr;
-
-  len = MYDNS_RR_DATA_LENGTH(rr);
+  const char	*data = MYDNS_RR_DATA_VALUE(rr);
+  size_t	len = MYDNS_RR_DATA_LENGTH(rr);
+  size_t	rdlen = 0, off = 0;
 
   if (reply_start_rr(t, r, (char*)r->name, DNS_QTYPE_TXT, rr->ttl, "TXT") < 0)
     return (-1);
 
-  size = len + 1;
-  r->length += SIZE16 + size;
+  rdlen = reply_txt_rdlength(data, len);
+  if (rdlen > 0xFFFF)
+    return dnserror(t, DNS_RCODE_SERVFAIL, ERR_INTERNAL);
+  r->length += SIZE16 + rdlen;
 
-  if (!(dest = rdata_enlarge(t, SIZE16 + size)))
+  if (!(dest = rdata_enlarge(t, SIZE16 + rdlen)))
     return dnserror(t, DNS_RCODE_SERVFAIL, ERR_INTERNAL);
 
-  DNS_PUT16(dest, size);
-  *dest++ = len;
-  memcpy(dest, MYDNS_RR_DATA_VALUE(rr), len);
-  dest += len;
+  DNS_PUT16(dest, rdlen);
+  do {
+    size_t elen = (off < len) ? strnlen(&data[off], len - off) : 0;
+    size_t eoff = 0;
+
+    do {								/* At least one (maybe empty) chunk */
+      size_t chunk = (elen - eoff > 255) ? 255 : elen - eoff;
+
+      *dest++ = (unsigned char)chunk;
+      memcpy(dest, &data[off + eoff], chunk);
+      dest += chunk;
+      eoff += chunk;
+    } while (eoff < elen);
+    off += elen + 1;
+  } while (off < len);
   return (0);
 }
 /*--- reply_add_txt() ---------------------------------------------------------------------------*/
@@ -1083,7 +1115,8 @@ build_reply(TASK *t, int want_additional) {
   DNS_PUT16(dest, arcount);					/* ADDITIONAL count */
   if (t->qdlen && t->qd)
     DNS_PUT(dest, t->qd, t->qdlen);				/* Data for QUESTION section */
-  DNS_PUT(dest, t->rdata, t->rdlen);				/* Resource record data */
+  if (t->rdlen && t->rdata)
+    DNS_PUT(dest, t->rdata, t->rdlen);				/* Resource record data */
 
 #if DEBUG_ENABLED && DEBUG_REPLY
   DebugX("reply", 1, _("%s: reply:     id = %u"), desctask(t),

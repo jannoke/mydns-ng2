@@ -449,11 +449,6 @@ typedef struct _mydns_rr {				/* `rr' table data (resource records) */
 #endif
 
   char			*active;
-#if USE_PGSQL
-  timestamp		stamp;
-#else
-  MYSQL_TIME		*stamp;
-#endif
   uint32_t		serial;
 
   char			*_name;		/* Max contents is DNS_MAXNAMELEN */
@@ -565,11 +560,6 @@ extern void		_mydns_rr_free(MYDNS_RR *);
 #define			mydns_rr_free(p)	if ((p)) _mydns_rr_free((p)), (p) = NULL
 extern MYDNS_RR		*mydns_rr_build(uint32_t, uint32_t, dns_qtype_t, dns_class_t, uint32_t, uint32_t,
 					char *active,
-#if USE_PGSQL
-					timestamp stamp,
-#else
-					MYSQL_TIME *stamp,
-#endif
 					uint32_t, char *, char *,  uint16_t, const char *);
 extern MYDNS_RR		*mydns_rr_parse(SQL_ROW, unsigned long *, const char *);
 extern char		*mydns_rr_columns(void);

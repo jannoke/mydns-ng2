@@ -19,6 +19,7 @@
 **************************************************************************************************/
 
 #include <assert.h>
+#include <sys/random.h>
 
 #include "named.h"
 
@@ -259,6 +260,67 @@ __recursive_fwd_reconnect_read(TASK *t) {
   return TASK_FAILED;
 }
 
+/*
+** A fresh unpredictable, non-zero 16-bit message id for each forwarded query. The old code
+** used the task's sequential internal_id, so an off-path attacker could predict the id of the
+** next query to the forwarder and race it a forged answer - which then went into the reply
+** cache for every client.
+*/
+static uint16_t
+recursive_random_id(void) {
+  uint16_t id = 0;
+
+  while (!id)
+    if (getrandom(&id, sizeof(id), 0) != sizeof(id))
+      id = (uint16_t)(random() ^ time(NULL));
+  return id;
+}
+
+/*
+** Find the task this forwarder reply belongs to: the message id must be the random one we
+** sent, and the reply must carry exactly the question we asked (one question, same name and
+** type). Returns NULL if no waiting task matches.
+*/
+static TASK *
+recursive_find_task(TASK *t, uchar *reply, size_t replylen) {
+  uchar		*src = reply;
+  uint16_t	id = 0, qdcount = 0, qtype = 0;
+  char		*qname = NULL;
+  task_error_t	errcode = 0;
+  TASK		*realT = NULL;
+  int		i;
+
+  if (replylen < DNS_HEADERSIZE)
+    return (NULL);
+  DNS_GET16(id, src);
+  src = reply + SIZE16 + SIZE16;
+  DNS_GET16(qdcount, src);
+  if (qdcount != 1)
+    return (NULL);
+
+  src = reply + DNS_HEADERSIZE;
+  if (!(qname = (char*)name_unencode2(reply, replylen, &src, &errcode)))
+    return (NULL);
+  if (src + SIZE16 > reply + replylen) {
+    RELEASE(qname);
+    return (NULL);
+  }
+  DNS_GET16(qtype, src);
+
+  for (i = HIGH_PRIORITY_TASK; i <= LOW_PRIORITY_TASK && !realT; i++) {
+    TASK *ThisT;
+
+    for (ThisT = TaskArray[PERIODIC_TASK][i]->head; ThisT; ThisT = ThisT->next)
+      if (ThisT->fwd_id && ThisT->fwd_id == id
+	  && ThisT->qtype == qtype && !strcasecmp(ThisT->qname, qname)) {
+	realT = ThisT;
+	break;
+      }
+  }
+  RELEASE(qname);
+  return (realT);
+}
+
 static taskexec_t
 __recursive_fwd_setup_query(TASK *t, recursive_fwd_write_t **querypacket) {
   recursive_fwd_write_t	*qp = NULL;
@@ -278,7 +340,8 @@ __recursive_fwd_setup_query(TASK *t, recursive_fwd_write_t **querypacket) {
   if (!qp->query) {
     size_t		querylen;
     /* Construct the query */
-    if (!(qp->query = dns_make_question(t, t->internal_id, t->qtype, t->qname, 1, &querylen)))
+    t->fwd_id = recursive_random_id();
+    if (!(qp->query = dns_make_question(t, t->fwd_id, t->qtype, t->qname, 1, &querylen)))
       return dnserror(t, DNS_RCODE_FORMERR, querylen);
 
     qp->querylength = querylen;
@@ -633,7 +696,8 @@ __recursive_fwd_read_udp(TASK *t, void *data) {
   replypacket->replyread += rv;
   replylen -= rv;
 
-  if(replypacket->replylength < DNS_HEADERSIZE) {
+  /* A UDP reply is one datagram: what recv() returned is the message, not the buffer size */
+  if(replypacket->replyread < DNS_HEADERSIZE) {
     RELEASE(reply);
     RELEASE(replypacket);
     t->extension = NULL;
@@ -642,17 +706,13 @@ __recursive_fwd_read_udp(TASK *t, void *data) {
   }
 
   /* Find the corresponding task on the PERIODIC queue for this operation */
-  src = (uchar*)reply;
-  DNS_GET16(id, src);
-
-  for (i = HIGH_PRIORITY_TASK; i <= LOW_PRIORITY_TASK; i++) {
-    if ((realT = task_find_by_id(t, TaskArray[PERIODIC_TASK][i], id))) break;
-  }
+  realT = recursive_find_task(t, (uchar*)reply, replypacket->replyread);
 
   t->extension = NULL;
 
   if (realT) {
-    __recursive_fwd_read(realT, reply, replypacket->replylength);
+    __recursive_fwd_read(realT, reply, replypacket->replyread);
+    realT->fwd_id = 0;
     /* Move task back to NORMAL Q */
     task_change_type(realT, NORMAL_TASK);
     udp_recursion_running--;
@@ -821,17 +881,13 @@ __recursive_fwd_read_tcp(TASK *t, void *data) {
   }
 
   /* Find the corresponding task on the PERIODIC queue for this operation */
-  src = (uchar*)reply;
-  DNS_GET16(id, src);
-
-  for (i = HIGH_PRIORITY_TASK; i <= LOW_PRIORITY_TASK; i++) {
-    if ((realT = task_find_by_id(t, TaskArray[PERIODIC_TASK][i], id))) break;
-  }
+  realT = recursive_find_task(t, (uchar*)reply, replypacket->replylength);
 
   t->extension = NULL;
 
   if (realT) {
     __recursive_fwd_read(realT, reply, replypacket->replylength);
+    realT->fwd_id = 0;
   /* Move task back to IO Q */
     task_change_type(realT, IO_TASK); 
     tcp_recursion_running--;

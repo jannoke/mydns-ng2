@@ -35,6 +35,7 @@ typedef struct _update_query_rr {
   struct {
     uint16_t		len;
     uchar		*value;
+    size_t		offset;		/* Where the RDATA starts in t->query */
   } rdata;
 } UQRR;
 
@@ -190,24 +191,13 @@ check_update(TASK *t, MYDNS_SOA *soa) {
 
   ip = clientaddr(t);
 
-  /* If the 'soa' table does not have an 'update' column, listing access rules, allow
-     DNS UPDATE only from 127.0.0.1 and all local addresses */
+  /* If the 'soa' table does not have an 'update_acl' column listing access rules, allow
+     DNS UPDATE only from the loopback address. (MyDNS-NG also trusted every address of every
+     local interface - including public ones - which is far wider than "local clients" and
+     relies on the network to drop spoofed packets claiming those source addresses.) */
   if (!mydns_soa_use_update_acl) {
-    char **allLocalAddresses = all_interface_addresses();
-
-    if (allLocalAddresses) {
-      while(allLocalAddresses[0]) {
-	if (!strcmp(ip, allLocalAddresses[0])) {
-	  ok = 1;
-	  break;
-	}
-	allLocalAddresses = &allLocalAddresses[1];
-      }
-    }
-
-    if (ok || !strcmp(ip, "127.0.0.1")) {			/* OK from localhost */
+    if (!strcmp(ip, "127.0.0.1") || !strcmp(ip, "::1"))
       return 0;
-    }
     return dnserror(t, DNS_RCODE_REFUSED, ERR_NO_UPDATE);
   }
 
@@ -224,7 +214,9 @@ check_update(TASK *t, MYDNS_SOA *soa) {
   res = sql_query(sql, query, querylen);
   RELEASE(query);
   if (!res) {
-    ErrSQL(sql, "%s: %s", desctask(t), _("error loading DNS UPDATE access rules"));
+    /* ErrSQL() would terminate the whole server on a transient database error */
+    WarnSQL(sql, "%s: %s", desctask(t), _("error loading DNS UPDATE access rules"));
+    return dnserror(t, DNS_RCODE_SERVFAIL, ERR_DB_ERROR);
   }
 
   if ((row = sql_getrow(res, NULL))) {
@@ -241,12 +233,12 @@ check_update(TASK *t, MYDNS_SOA *soa) {
 	ok = 1;
     }
   }
+#if DEBUG_ENABLED && DEBUG_UPDATE
+  DebugX("update", 1, _("%s: checked DNS UPDATE access rule '%s' res = %s"), desctask(t),
+	 (row && row[0]) ? row[0] : "", (ok)?"OK":"FAILED");
+#endif
   sql_free(res);
 
-#if DEBUG_ENABLED && DEBUG_UPDATE
-  DebugX("update", 1, _("%s: checked DNS UPDATE access rule '%s' res = %s"), desctask(t), row[0],
-	 (ok)?"OK":"FAILED");
-#endif
   if (!ok)
     return dnserror(t, DNS_RCODE_REFUSED, ERR_NO_UPDATE);
 
@@ -318,10 +310,22 @@ update_gobble_rr(TASK *t, uchar *query, size_t querylen, uchar *current, UQRR *r
   DebugX("update", 1, _("%s: update_gobble_rr unencoded name src=%s"), desctask(t), UQRR_NAME(rr));
 #endif
 
+  /* The fixed part of the RR (TYPE, CLASS, TTL, RDLENGTH) must be inside the packet */
+  if (src + SIZE16 + SIZE16 + SIZE32 + SIZE16 > query + querylen) {
+    formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
+    return NULL;
+  }
   DNS_GET16(rr->type, src);
   DNS_GET16(rr->class, src);
   DNS_GET32(rr->ttl, src);
   DNS_GET16(UQRR_DATA_LENGTH(rr), src);
+
+  /* RDLENGTH is attacker-supplied: it must not claim more data than the packet holds */
+  if (UQRR_DATA_LENGTH(rr) > (size_t)(query + querylen - src)) {
+    formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
+    return NULL;
+  }
+  rr->rdata.offset = src - query;
   UQRR_DATA_VALUE(rr) = ALLOCATE(UQRR_DATA_LENGTH(rr)+1, char[]);
 
   memcpy(UQRR_DATA_VALUE(rr), src, UQRR_DATA_LENGTH(rr));
@@ -354,6 +358,8 @@ parse_update_query(TASK *t, UQ *q) {
   */
   if (!(UQ_NAME(q) = name_unencode2(query, querylen, &src, &errcode)))
     return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
+  if (src + SIZE16 + SIZE16 > query + querylen)
+    return formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
   DNS_GET16(q->type, src);
   DNS_GET16(q->class, src);
 #if DEBUG_ENABLED && DEBUG_UPDATE
@@ -436,32 +442,65 @@ parse_update_query(TASK *t, UQ *q) {
 **************************************************************************************************/
 static char *
 text_retrieve(unsigned char **srcp, unsigned char *end, size_t *datalen, int one_word_only) {
-  size_t	n = 0;
-  int		x = 0;							/* Offset in 'data' */
-  char 		*data = NULL;
   unsigned char	*src = *srcp;
+  size_t	n = 0;						/* Offset in 'data' */
+  /*
+  ** The result never needs more room than the input: every length octet becomes at most one
+  ** NUL separator. Allocating that up front replaces the old grow-as-you-go logic, which did
+  ** not count the separators and wrote past the end of its buffer once there were 2+ strings,
+  ** and returned NULL (then dereferenced by HINFO) when there was no data at all.
+  */
+  char		*data = ALLOCATE((src < end ? (size_t)(end - src) : 0) + 1, char[]);
 
-  *datalen = 0;
+  while (src < end) {
+    size_t len = *src++;
 
-  for (n = 0; src < end; ) {
-    int len = *src++;
-
-    if (n >= *datalen) {
-      *datalen += len;
-      data = REALLOCATE(data, (*datalen)+1, char[]);
-    }
+    if (len > (size_t)(end - src))				/* Truncated string: take what's there */
+      len = end - src;
     if (n)
-      data[n++] = '\0';
-    for (x = 0; x < len && src < end; x++)
-      data[n++] = *src++;
+      data[n++] = '\0';					/* Separator between strings */
+    memcpy(&data[n], src, len);
+    n += len;
+    src += len;
     if (one_word_only)
       break;
   }
   data[n] = '\0';
+  *datalen = n;
   *srcp = src;
   return data;
 }
 /*--- text_retrieve() ---------------------------------------------------------------------------*/
+
+
+/**************************************************************************************************
+	UPDATE_RDATA_NAME
+	Decode the domain name at offset *pos within rr's RDATA and advance *pos past it.
+	Names in RDATA may use compression pointers into the rest of the message, so they are
+	decoded against the original query (t->query), not the RDATA copy; the name must still
+	end inside the RDATA. Returns the name, or NULL with *errcode set.
+**************************************************************************************************/
+static char *
+update_rdata_name(TASK *t, UQRR *rr, size_t *pos, task_error_t *errcode) {
+  uchar		*rdstart = (uchar*)t->query + rr->rdata.offset;
+  uchar		*cur = rdstart + *pos;
+  char		*name = NULL;
+
+  if (*pos >= UQRR_DATA_LENGTH(rr)) {
+    *errcode = ERR_MALFORMED_REQUEST;
+    return (NULL);
+  }
+  if (!(name = (char*)name_unencode2((uchar*)t->query, t->len, &cur, errcode)))
+    return (NULL);
+  if (cur > rdstart + UQRR_DATA_LENGTH(rr)) {			/* Name ran past the RDATA */
+    RELEASE(name);
+    *errcode = ERR_MALFORMED_REQUEST;
+    return (NULL);
+  }
+  *pos = cur - rdstart;
+  return (name);
+}
+/*--- update_rdata_name() -----------------------------------------------------------------------*/
 
 
 /**************************************************************************************************
@@ -475,6 +514,7 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
   unsigned char	*src = (unsigned char*)UQRR_DATA_VALUE(rr);
   unsigned char	*end = (unsigned char*)(UQRR_DATA_VALUE(rr) + UQRR_DATA_LENGTH(rr));
   task_error_t	errcode = 0;
+  size_t	pos = 0;					/* Offset within the RDATA */
 
   *edata = NULL;
   *edatalen = 0;
@@ -502,7 +542,7 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
     break;
 
   case DNS_QTYPE_NS:
-    if (!(*data = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode)))
+    if (!(*data = update_rdata_name(t, rr, &pos, &errcode)))
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
     *datalen = strlen(*data);
     break;
@@ -516,7 +556,7 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
     return (TASK_FAILED);
 
   case DNS_QTYPE_CNAME:
-    if (!(*data = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode)))
+    if (!(*data = update_rdata_name(t, rr, &pos, &errcode)))
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
     *datalen = strlen(*data);
     break;
@@ -546,7 +586,7 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
     return (TASK_FAILED);
 
   case DNS_QTYPE_PTR:
-    if (!(*data = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode)))
+    if (!(*data = update_rdata_name(t, rr, &pos, &errcode)))
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
     *datalen = strlen(*data);
     break;
@@ -582,8 +622,11 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
     return (TASK_FAILED);
 
   case DNS_QTYPE_MX:
+    if (UQRR_DATA_LENGTH(rr) < SIZE16)
+      return formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
     DNS_GET16(*aux, src);
-    if (!(*data = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode)))
+    pos = SIZE16;
+    if (!(*data = update_rdata_name(t, rr, &pos, &errcode)))
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
     *datalen = strlen(*data);
     break;
@@ -599,9 +642,9 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
   case DNS_QTYPE_RP: {
     char *data1, *data2;
 
-    if (!(data1 = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode)))
+    if (!(data1 = update_rdata_name(t, rr, &pos, &errcode)))
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
-    if (!(data2 = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode))) {
+    if (!(data2 = update_rdata_name(t, rr, &pos, &errcode))) {
       RELEASE(data1);
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
     }
@@ -684,11 +727,14 @@ update_get_rr_data(TASK *t, UQRR *rr, char **data, size_t *datalen,
     uint16_t weight, port;
     char *data1;
 
+    if (UQRR_DATA_LENGTH(rr) < SIZE16 * 3)
+      return formerr(t, DNS_RCODE_FORMERR, ERR_MALFORMED_REQUEST, NULL);
     DNS_GET16(*aux, src);
     DNS_GET16(weight, src);
     DNS_GET16(port, src);
+    pos = SIZE16 * 3;
 
-    if (!(data1 = (char*)name_unencode2((uchar*)t->query, t->len, (uchar**)&src, &errcode)))
+    if (!(data1 = update_rdata_name(t, rr, &pos, &errcode)))
       return formerr(t, DNS_RCODE_FORMERR, errcode, NULL);
 
     *datalen = ASPRINTF(data, "%u %u %s", weight, port, data1);
@@ -1389,7 +1435,7 @@ update_add_rr(TASK *t, MYDNS_SOA *soa, UQRR *rr, uint32_t next_serial) {
       {
 	char *serialstr = NULL;
 	if (mydns_rr_use_serial)
-	  ASPRINTF(&serialstr, "%u", next_serial);
+	  ASPRINTF(&serialstr, ",%u", next_serial);
 	querylen = sql_build_query(&query,
 #if USE_PGSQL
 				   "INSERT INTO %s"
@@ -2229,7 +2275,11 @@ are_we_master(TASK *t, MYDNS_SOA *soa) {
   int i = 0, j = 0, res = 1;
 
   int ipcount = 0;
-  ARRAY *nss = array_init(1);
+  ARRAY *nss = NULL;
+
+  if (!allLocalAddresses)		/* Interface list unavailable: we cannot claim to be master */
+    return (0);
+  nss = array_init(1);
 
   array_append(nss, STRDUP(soa->ns));
 
@@ -2275,7 +2325,7 @@ are_we_master(TASK *t, MYDNS_SOA *soa) {
  FINISHEDSEARCH:
 
   array_free(ips4, 1);
-#if HAVE_IPV4
+#if HAVE_IPV6
   array_free(ips6, 1);
 #endif
 
@@ -2295,13 +2345,13 @@ dns_update(TASK *t) {
   /* Try to load SOA for zone */
   if (mydns_soa_load(sql, &soa, t->qname) < 0) {
     dnserror(t, DNS_RCODE_SERVFAIL, ERR_DB_ERROR);
-    return (TASK_FAILED);
+    goto dns_update_error;
   }
 
   /* If there's no such zone, say REFUSED rather than NOTAUTH, to prevent "zone mining" */
   if (!soa) {
     dnserror(t, DNS_RCODE_REFUSED, ERR_ZONE_NOT_FOUND);
-    return (TASK_FAILED);
+    goto dns_update_error;
   }
 
 #if DEBUG_ENABLED && DEBUG_UPDATE
@@ -2318,12 +2368,12 @@ dns_update(TASK *t) {
    */
   if(!are_we_master(t, soa)) {
     dnserror(t, DNS_RCODE_NOTAUTH, ERR_NO_UPDATE);
-    return (TASK_FAILED);
+    goto dns_update_error;
   }
 
   /* Check the optional 'update' column if it exists */
   if (check_update(t, soa) != 0) {
-    return (TASK_FAILED);
+    goto dns_update_error;
   }
 
   /* Parse the update query */
@@ -2393,8 +2443,11 @@ dns_update(TASK *t) {
   return (TASK_EXECUTED);
 
 dns_update_error:
+  /* Every failure must still produce a reply: returning before build_reply() left
+     t->reply empty and the client got a zero-length datagram */
   build_reply(t, 1);
-  free_uq(q);
+  if (q)
+    free_uq(q);
   mydns_soa_free(soa);
   return (TASK_FAILED);
 }

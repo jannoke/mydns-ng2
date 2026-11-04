@@ -574,23 +574,11 @@ check_rr(void) {
 
   case DNS_QTYPE_TXT:							/* Data: Undefined text string */
     /*
-     * Data length must be less than DNS_MAXTXTLEN
-     * and each element must be less than DNS_MAXTXTELEMLEN
+     * Data length must be less than DNS_MAXTXTLEN. Individual NUL-separated strings may be
+     * longer than DNS_MAXTXTELEMLEN: the server splits them into 255-octet chunks.
      */
     if (MYDNS_RR_DATA_LENGTH(rr) > DNS_MAXTXTLEN)
       rrproblem(_("Text record length is too great"));
-    {
-      char	*txt = MYDNS_RR_DATA_VALUE(rr);
-      uint16_t	txtlen = MYDNS_RR_DATA_LENGTH(rr);
-
-      while (txtlen > 0) {
-	uint16_t len = strlen(txt);
-	if (len > DNS_MAXTXTELEMLEN)
-	  rrproblem(_("Text element in TXT record is too long"));
-	txt = &txt[len];
-	txtlen -= len;
-      }
-    }
     break;
 
   default:

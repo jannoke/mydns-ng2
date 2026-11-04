@@ -293,7 +293,7 @@ _notify_read(TASK *t, struct sockaddr_storage *from, socklen_t fromlen) {
 		} else if (from->ss_family == AF_INET6) {
 			if (memcmp(&((struct sockaddr_in6*)from)->sin6_addr,
 				&((struct sockaddr_in6*)slaveaddr)->sin6_addr,
-				sizeof(struct in6_addr) != 0))
+				sizeof(struct in6_addr)) != 0)
 			{
 				if (slave->replied) { slavecount--; }
 				continue;
@@ -354,7 +354,7 @@ notify_read(TASK *t) {
 
 		if (rv < 0) {
 			if (
-				(errno = EINTR)
+				(errno == EINTR)
 #ifdef EAGAIN
 				|| (errno == EAGAIN)
 #else
@@ -411,7 +411,7 @@ notify_read(TASK *t) {
 				uchar *msg2 = NULL;
 				task_error_t errcode = TASK_FAILED;
 				DebugX("notify", 1, _("%s: DNS NOTIFY notify_read response is a query"), desctask(t));
-				msg2 = name_unencode2(src, rv - DNS_HEADERSIZE, &current, &errcode);
+				msg2 = name_unencode2(in, rv, &current, &errcode);
 				if (msg2) {
 					dns_qtype_t qtype = 0;
 					dns_class_t qclass = 0;
