@@ -35,6 +35,11 @@ int
 name_remember(TASK *t, const char *name, unsigned int offset) {
   if (!name || strlen(name) > 64)			/* Don't store labels > 64 bytes in length */
     return (0);
+  /* A compression pointer has only 14 bits of offset (RFC 1035 4.1.4). A name written further
+     into a (TCP) reply than that can't be pointed to: "0xC000 | offset" would silently point
+     somewhere else and corrupt every later name that used it. */
+  if (offset > 0x3FFF)
+    return (0);
 
 #if DYNAMIC_NAMES
   t->Names = REALLOCATE(t->Names, (t->numNames + 1) * sizeof(char *), char*[]);
@@ -110,7 +115,7 @@ name_encode(TASK *t, char *dest, const char *name, unsigned int dest_offset, int
   strncpy(namebuf, name, sizeof(namebuf)-1);
 
   /* Label must end in the root zone (with a dot) */
-  if (LASTCHAR(namebuf) != '.')
+  if (!namebuf[0] || LASTCHAR(namebuf) != '.')
     return dnserror(t, DNS_RCODE_SERVFAIL, ERR_NAME_FORMAT);
 
   /* Examine name one label at a time */
@@ -144,6 +149,8 @@ name_encode(TASK *t, char *dest, const char *name, unsigned int dest_offset, int
 	  nlen = strlen(this_name);
 	  if (nlen > DNS_MAXLABELLEN)
 	    return dnserror(t, DNS_RCODE_SERVFAIL, ERR_RR_LABEL_TOO_LONG);
+	  if (nlen == 0)		/* "a..b." or ".a.": an empty label would end the name early */
+	    return dnserror(t, DNS_RCODE_SERVFAIL, ERR_NAME_FORMAT);
 	  len += nlen + 1;
 	  if (len > DNS_MAXNAMELEN)
 	    return dnserror(t, DNS_RCODE_SERVFAIL, ERR_RR_NAME_TOO_LONG);
@@ -169,8 +176,10 @@ name_encode2(TASK *t, char **dest, const char *name, unsigned int dest_offset, i
   namebuf = STRDUP(name);
 
   /* Label must end in the root zone (with a dot) */
-  if (LASTCHAR(namebuf) != '.')
+  if (!*namebuf || LASTCHAR(namebuf) != '.') {
+    RELEASE(namebuf);
     return dnserror(t, DNS_RCODE_SERVFAIL, ERR_NAME_FORMAT);
+  }
 
   *dest = ALLOCATE(strlen(namebuf) + 1, char[]); /* If not compressing this should be equal
 						    If compressing then it should be bigger */
@@ -213,6 +222,11 @@ name_encode2(TASK *t, char **dest, const char *name, unsigned int dest_offset, i
 	    RELEASE(*dest);
 	    RELEASE(namebuf);
 	    return dnserror(t, DNS_RCODE_SERVFAIL, ERR_RR_LABEL_TOO_LONG);
+	  }
+	  if (nlen == 0) {		/* "a..b." or ".a.": an empty label would end the name early */
+	    RELEASE(*dest);
+	    RELEASE(namebuf);
+	    return dnserror(t, DNS_RCODE_SERVFAIL, ERR_NAME_FORMAT);
 	  }
 	  len += nlen + 1;
 	  if (len > DNS_MAXNAMELEN) {
