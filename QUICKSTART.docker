@@ -1,0 +1,53 @@
+Quickstart instructions for MyDNS (Docker, MySQL/MariaDB):
+
+...............................................................................
+
+1.	Start MyDNS with MariaDB and a demo zone (example.test.).
+
+	$ cp .env.example .env		# optional: password, port, AXFR
+	$ docker compose up -d
+	$ dig @127.0.0.1 -p 5353 www.example.test
+
+	The first start creates the tables (mydns --create-tables) and loads
+	docker/demo-zone.sql. Later starts leave the database alone. To start
+	over: docker compose down -v
+
+...............................................................................
+
+2.	The image on its own.
+
+	$ docker build -t mydns .
+	$ docker run -d -p 53:53/udp -p 53:53/tcp \
+	      -e MYDNS_DB_HOST=dbhost:3306 -e MYDNS_DB_PASSWORD=secret mydns
+
+	Without a mounted /etc/mydns.conf the entrypoint writes one from:
+
+	  MYDNS_DB_HOST		db (host or host:port)
+	  MYDNS_DB_USER		mydns
+	  MYDNS_DB_PASSWORD	(empty)
+	  MYDNS_DATABASE		mydns
+	  MYDNS_LISTEN		*
+	  MYDNS_ALLOW_TCP	yes
+	  MYDNS_ALLOW_AXFR	no
+	  MYDNS_ALLOW_UPDATE	no
+	  MYDNS_RECURSIVE	(empty: no forwarding)
+	  MYDNS_EXTRA		more lines for mydns.conf, see mydns.conf(5)
+
+	Or mount your own: -v /path/mydns.conf:/etc/mydns.conf:ro (mode 0600,
+	or mydns warns). Use "log = stderr" in it, so "docker logs" shows it.
+
+	Other variables:
+
+	  MYDNS_INIT_SCHEMA=1	create the tables if the SOA table is missing,
+				then load /docker-entrypoint.d/*.sql once
+	  MYDNS_DB_WAIT		seconds to wait for the database (60)
+	  MYDNS_HEALTH_NAME	zone whose SOA the healthcheck asks for
+
+	Arguments starting with "-" go to mydns:
+	  $ docker run --rm mydns --version
+	  $ docker run --rm mydns --create-tables > tables.sql
+
+...............................................................................
+
+The image is built for MySQL/MariaDB only: one binary supports one database
+backend, chosen at build time.
