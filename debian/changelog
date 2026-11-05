@@ -1,3 +1,26 @@
+mydns (2.0.0-dc) trixie; urgency=medium
+
+  * Multiple database servers in db-host ("db1, db2:3307"), with failover:
+    when the server in use stops answering, the next query tries the others
+    in order. There is no failback; a single host behaves as before.
+  * Retry connecting to the database at startup instead of exiting
+    (db-connect-wait, default 0 = keep trying, -1 = exit as before). Fixes
+    the tight respawn loop of server processes while the database is down.
+  * Database timeouts (db-timeout, default 3 s). After losing the connection,
+    queries fail at once for db-retry-interval (default 10 s), so a hung
+    database no longer stalls every query, cached answers included. One log
+    line when the connection is lost and one when it is restored.
+  * sql_reopen(): keep the saved host:port across failed reconnects, pass the
+    PostgreSQL port without the colon, and free the MySQL handle of a failed
+    reconnect (about 1.2 KB leaked per failing query).
+  * MYSQL_OPT_RECONNECT gets a pointer to a boolean, not the string "1".
+  * PostgreSQL build: fix configure's version string with a current
+    pg_config.h, and drop the libecpg-only pgtypes include.
+  * Sample /etc/mydns.conf: db-timeout, db-retry-interval, db-connect-wait.
+  * Source format 3.0 (quilt), for the "dc" package revision.
+
+ -- Taavi Sannik <taavi@sannik.ee>  Thu, 05 Nov 2026 02:13:12 +0200
+
 mydns (1.2.8.32) trixie; urgency=medium
 
   * Debian 13 packaging, MySQL/MariaDB backend (mydns-mysql).

@@ -18,7 +18,7 @@
 ##	Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 ##
 
-AC_INIT(mydns, [1.2.8.32], [http://bugs.mydns-ng.com/])
+AC_INIT(mydns, [2.0.0], [http://bugs.mydns-ng.com/])
 AC_USE_SYSTEM_EXTENSIONS
 AC_PREREQ([2.60])
 AC_COPYRIGHT([Portions of this script are Copyright 2002-2005 Don Moore  2007-2009 Howard Wilkinson])
